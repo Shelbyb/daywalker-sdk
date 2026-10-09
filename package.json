@@ -1,6 +1,6 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Validate Daywalker API tokens and make domain-signed calls to Daywalker Auth from any service.",
   "type": "module",
   "main": "./dist/index.js",
@@ -33,7 +33,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build"
+    "test": "npm run build && node --import tsx --test test/*.test.ts",
+    "prepublishOnly": "npm test"
   },
   "publishConfig": {
     "access": "public",
@@ -42,13 +43,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Shelbyb/daywalker-service-auth.git",
-    "directory": "packages/sdk"
+    "url": "git+https://github.com/Shelbyb/daywalker-sdk.git"
   },
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.13.5",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "tsx": "^4.23.15"
   },
   "keywords": [
     "daywalker",
@@ -57,5 +58,8 @@
     "ed25519",
     "request-signing"
   ],
-  "homepage": "https://auth.daywalker.dev/docs"
+  "homepage": "https://auth.daywalker.dev/docs",
+  "bugs": {
+    "url": "https://github.com/Shelbyb/daywalker-sdk/issues"
+  }
 }

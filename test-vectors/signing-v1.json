@@ -1,0 +1,48 @@
+{
+  "description": "Daywalker domain-signed request test vectors (signature version daywalker-v1). Shared by the SDK and the Daywalker Auth server; both must reproduce these exactly. The key is public and for tests only.",
+  "version": "daywalker-v1",
+  "privateKeyPkcs8Base64": "MC4CAQAwBQYDK2VwBCIEIKOir9Mm0GOBaPDIFyKgsntHgvl66sBqNA0trSBZfSp4",
+  "publicJwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "x": "0udnw7H-41F93Cdlerf_8PQ1eu30XrwLNopgnMtc5v4",
+    "kid": "ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg",
+    "use": "sig",
+    "alg": "EdDSA"
+  },
+  "cases": [
+    {
+      "name": "validate",
+      "method": "POST",
+      "path": "/api/v1/tokens/validate",
+      "domain": "sonalyze.daywalker.dev",
+      "timestamp": "1791561600",
+      "nonce": "dGVzdC12ZWN0b3Itbm9uY2UtMDE",
+      "body": "{\"token\":\"srv_live_vector_example_token_0000000000000000\",\"serviceSlug\":\"sonalyze\"}",
+      "canonicalPayload": "daywalker-v1\nPOST\n/api/v1/tokens/validate\nsonalyze.daywalker.dev\n1791561600\ndGVzdC12ZWN0b3Itbm9uY2UtMDE\nc34ba17bb07b2627887a796384b49185ee03c76bf6c6c35e92a142cf2e9503a1",
+      "signature": "lgV5Cv3qklOZ8JEXxH5QyNew1Y4eFKbxrYR3xyw4vCOxuibOb5vxm5zBGEf5BIhlqJkU52AK71kUF1UAFznKDQ"
+    },
+    {
+      "name": "empty-body-get",
+      "method": "GET",
+      "path": "/api/v1/services",
+      "domain": "gigpulse.daywalker.dev",
+      "timestamp": "1791561601",
+      "nonce": "dGVzdC12ZWN0b3Itbm9uY2UtMDI",
+      "body": "",
+      "canonicalPayload": "daywalker-v1\nGET\n/api/v1/services\ngigpulse.daywalker.dev\n1791561601\ndGVzdC12ZWN0b3Itbm9uY2UtMDI\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "signature": "usqeIFakZAGRdbzmXvbN9sDgiqmynf9vUpbGuXqyaf__PJp2pwO4jxJPBseFdEp1C8960fsK3zIPo4lQ3LI6Ag"
+    },
+    {
+      "name": "unicode-body",
+      "method": "POST",
+      "path": "/api/v1/tokens/validate",
+      "domain": "api.example.com",
+      "timestamp": "1791561602",
+      "nonce": "dGVzdC12ZWN0b3Itbm9uY2UtMDM",
+      "body": "{\"note\":\"héllo ✓\"}",
+      "canonicalPayload": "daywalker-v1\nPOST\n/api/v1/tokens/validate\napi.example.com\n1791561602\ndGVzdC12ZWN0b3Itbm9uY2UtMDM\nbc3e123f5bf1fbe552ed1eb7d6943990888bd741a174dfa2aee941ce3002bf63",
+      "signature": "A8eA1BDRBlaQCHD0msyPGmBp_yx3lHwevSCoBfyN4XP6qk1aN_tx0DwW4hvJgfI1krHYae0ZIEgDAtWW58KyBg"
+    }
+  ]
+}

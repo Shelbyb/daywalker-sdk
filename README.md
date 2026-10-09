@@ -87,4 +87,19 @@ const client = createDaywalker({ serviceSlug: "gigpulse", domain: "gigpulse.dayw
 
 ## How signing works
 
-Each request carries `X-Daywalker-Domain`, `-Key-Id`, `-Timestamp`, `-Nonce`, and `-Signature`, an Ed25519 signature over the method, path, domain, timestamp, nonce, and the body's SHA-256. Daywalker fetches the public key from your domain over HTTPS, so a valid signature proves the request comes from whoever controls the domain. Timestamps must be within 5 minutes and nonces are single-use. See the Daywalker README for the full protocol.
+Each request carries `X-Daywalker-Domain`, `-Key-Id`, `-Timestamp`, `-Nonce`, and `-Signature`, an Ed25519 signature over the method, path, domain, timestamp, nonce, and the body's SHA-256. Daywalker fetches the public key from your domain over HTTPS, so a valid signature proves the request comes from whoever controls the domain. Timestamps must be within 5 minutes and nonces are single-use. The exact protocol is pinned by [`test-vectors/signing-v1.json`](./test-vectors/signing-v1.json); the Daywalker Auth server tests against the same file.
+
+## Development
+
+```bash
+npm install
+npm test        # builds, then runs the tests (including the shared signing test vectors)
+```
+
+Releases: bump `version` in `package.json`, merge to `main`, then `git tag v<version> && git push origin v<version>`. The publish workflow runs the tests and publishes to npm with provenance.
+
+**Changing the signing protocol?** `test-vectors/signing-v1.json` is the contract with the Daywalker Auth server, which verifies the same vectors. Never change existing cases; a new protocol version gets a new `daywalker-v2` file, and the server must accept it before the SDK sends it.
+
+## License
+
+MIT
