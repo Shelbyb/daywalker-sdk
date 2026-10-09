@@ -1,0 +1,32 @@
+{
+  "name": "@shelbyb/daywalker-sdk",
+  "version": "0.1.0",
+  "description": "Validate Daywalker API tokens and make domain-signed calls to Daywalker Auth from any service.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./next": { "types": "./dist/next.d.ts", "import": "./dist/next.js" },
+    "./express": { "types": "./dist/express.d.ts", "import": "./dist/express.js" }
+  },
+  "bin": { "daywalker": "./dist/cli.js" },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20.19" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": { "registry": "https://npm.pkg.github.com" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Shelbyb/daywalker-service-auth.git",
+    "directory": "packages/sdk"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "typescript": "^5.9.3"
+  }
+}
