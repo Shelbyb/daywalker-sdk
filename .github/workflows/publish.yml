@@ -1,0 +1,39 @@
+name: Publish
+
+# Publishes @shelbyb/daywalker-sdk to npm when a tag like v0.1.1 is pushed.
+# The tag must match package.json's version.
+#
+# Auth: npm trusted publishing (OIDC) for this repo and workflow, so no npm token is stored.
+# Each release gets a signed provenance attestation linking it to this commit.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+
+      - name: Check tag matches package version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package version $version"
+            exit 1
+          fi
+
+      # Trusted publishing needs npm 11.5.1+
+      - run: npm install -g npm@latest
+      - run: npm ci --no-audit --no-fund
+      - run: npm test
+      - run: npm publish --access public --provenance
