@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://cdn.daywalker.dev/assets/images/icon/daywalker-icon-transparent-512x512.jpeg" alt="Daywalker" width="160" />
+  <img src="./assets/logo-512.png" alt="Daywalker" width="160" />
 </p>
 
 # @shelbyb/daywalker-sdk
