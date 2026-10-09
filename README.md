@@ -21,12 +21,6 @@ The private key is never printed unless you pass `--print-key`.
 
 Then set `DAYWALKER_API_KEY` to the service's token, deploy, run `npx daywalker check`, and in the Daywalker dashboard click **Connect** on the token to add your domain to its allowed callers.
 
-> Installing from GitHub Packages needs a GitHub token with `read:packages` in your `.npmrc`:
-> ```
-> @shelbyb:registry=https://npm.pkg.github.com
-> //npm.pkg.github.com/:_authToken=${GITHUB_PACKAGES_TOKEN}
-> ```
-
 ## Environment
 
 | Variable | Required | Purpose |
