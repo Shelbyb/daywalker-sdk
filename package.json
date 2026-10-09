@@ -24,7 +24,7 @@
     }
   },
   "bin": {
-    "daywalker": "./dist/cli.js"
+    "daywalker": "dist/cli.js"
   },
   "files": [
     "dist",
