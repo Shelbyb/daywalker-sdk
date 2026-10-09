@@ -1,27 +1,28 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { createDaywalker } from "./client.js";
 import { publicHostname } from "./config.js";
-import { generateSigningKey } from "./signing.js";
+import { generateSigningKey, loadSigningKey, registerPublicKey, redactSecrets } from "./crypto/index.js";
 
-const HELP = `daywalker: connect a service to Daywalker Auth
+const HELP = `daywalker: connect a service to Daywalker Auth (RFC 9421 / Push Architecture)
 
 Usage:
-  daywalker init   --domain <host> --service <slug> [--do-app <name|id>] [--framework next|express] [--print-key]
-  daywalker rotate [--do-app <name|id>] [--print-key]
+  daywalker init   --service <slug> [--api-key <key>] [--domain <host>] [--auth-url <url>] [--json|--export] [--print-key]
+  daywalker rotate [--service <slug>] [--api-key <key>] [--auth-url <url>] [--json|--export] [--print-key]
   daywalker check
 
-init     Generates a signing key, adds the /.well-known/daywalker-keys.json route for your
-         framework, and writes DAYWALKER_* settings to .env.local. With --do-app it also sets
-         them on your DigitalOcean App Platform app (as an encrypted secret, via doctl).
-rotate   Generates a new key and keeps the old one published as DAYWALKER_SIGNING_KEY_PREVIOUS,
-         so requests signed with either key verify during the switch. Remove the previous key
-         a few minutes after deploying.
-check    Validates config and confirms your domain serves the current public key.
+init     Generates an Ed25519 keypair, registers the public key directly with Daywalker Auth
+         (POST /api/v1/keys/register), and writes DAYWALKER_* settings to .env.local (or outputs JSON with --json).
+         No public ingress or /.well-known route handlers are required.
+rotate   Generates a new Ed25519 key, registers it with Daywalker Auth, and keeps the old one
+         in .env.local as DAYWALKER_SIGNING_KEY_PREVIOUS during deployment transition.
+check    Validates configuration and confirms Daywalker Auth connection and signature readiness.
 
-The private key is never printed unless you pass --print-key.`;
+Options:
+  --json, --export  Output configuration as JSON for piping into Vercel, DigitalOcean, Fly.io, AWS SSM, etc.
+  --print-key       Print the private key to stdout (disabled by default for security).
+`;
 
 function args(argv: string[]) {
   const out: Record<string, string | boolean> = {};
@@ -38,11 +39,9 @@ function args(argv: string[]) {
 }
 
 function fail(message: string): never {
-  console.error(`✖ ${message}`);
+  console.error(redactSecrets(`✖ ${message}`));
   process.exit(1);
 }
-
-// --- .env.local ---------------------------------------------------------------
 
 function readEnvFile(file: string): Map<string, string> {
   const map = new Map<string, string>();
@@ -83,148 +82,175 @@ function ensureGitignored(dir: string, entry: string) {
   if (!covered) fs.appendFileSync(file, `${content.endsWith("\n") || !content ? "" : "\n"}${entry}\n`);
 }
 
-// --- framework route ------------------------------------------------------------
-
-function detectFramework(dir: string): "next" | "express" | null {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
-    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-    if (deps.next) return "next";
-    if (deps.express || deps.fastify || deps.koa || deps.hono) return "express";
-  } catch {
-    // no package.json
-  }
-  return null;
-}
-
-function addNextRoute(dir: string): string {
-  const appDir = ["src/app", "app"].map((d) => path.join(dir, d)).find((d) => fs.existsSync(d)) ?? path.join(dir, "app");
-  const routeDir = path.join(appDir, ".well-known", "daywalker-keys.json");
-  const routeFile = path.join(routeDir, "route.ts");
-  const rel = path.relative(dir, routeFile);
-  if (fs.existsSync(routeFile)) return `${rel} already exists (left unchanged)`;
-  // A static file here would shadow the route and pin an old key
-  const staticFile = path.join(dir, "public", ".well-known", "daywalker-keys.json");
-  if (fs.existsSync(staticFile)) console.warn(`! Remove ${path.relative(dir, staticFile)}; the route serves keys from env now.`);
-  fs.mkdirSync(routeDir, { recursive: true });
-  fs.writeFileSync(
-    routeFile,
-    `// Serves this service's public signing key so Daywalker Auth can verify its requests.\nexport { GET, dynamic } from "@shelbyb/daywalker-sdk/next";\n`
-  );
-  return `created ${rel}`;
-}
-
-// --- DigitalOcean ---------------------------------------------------------------
-
-function setDigitalOceanEnv(app: string, values: Record<string, { value: string | null; secret: boolean }>) {
-  const doctl = (a: string[], input?: string) =>
-    execFileSync("doctl", a, { encoding: "utf8", input, stdio: [input ? "pipe" : "ignore", "pipe", "pipe"] });
-  let appId = app;
-  if (!/^[0-9a-f-]{36}$/.test(app)) {
-    const apps = JSON.parse(doctl(["apps", "list", "--output", "json"])) as { id: string; spec: { name: string } }[];
-    appId = apps.find((a) => a.spec.name === app)?.id ?? fail(`No DigitalOcean app named "${app}"`);
-  }
-  const spec = JSON.parse(doctl(["apps", "spec", "get", appId, "--format", "json"]));
-  const components = [...(spec.services ?? []), ...(spec.workers ?? []), ...(spec.jobs ?? [])];
-  if (!components.length) fail("The app spec has no services, workers, or jobs to configure");
-  for (const component of components) {
-    component.envs = (component.envs ?? []).filter((e: { key: string }) => !(e.key in values));
-    for (const [key, { value, secret }] of Object.entries(values)) {
-      if (value !== null) component.envs.push({ key, value, scope: "RUN_TIME", ...(secret ? { type: "SECRET" } : {}) });
-    }
-  }
-  // Spec goes in via stdin so secrets never appear in process arguments
-  doctl(["apps", "update", appId, "--spec", "-", "--output", "json"], JSON.stringify(spec));
-  return appId;
-}
-
-// --- commands ---------------------------------------------------------------
-
 async function init(opts: Record<string, string | boolean>) {
+  const isJson = Boolean(opts.json || opts.export);
   const dir = process.cwd();
   const envFile = path.join(dir, ".env.local");
   const existing = readEnvFile(envFile);
-  const domain = publicHostname(String(opts.domain ?? existing.get("DAYWALKER_DOMAIN") ?? ""));
-  if (!domain) fail("--domain must be the public hostname that serves this app, e.g. --domain sonalyze.daywalker.dev");
-  const slug = String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? "").trim().toLowerCase();
-  if (!/^[a-z0-9_-]+$/.test(slug)) fail("--service must be this service's Daywalker slug, e.g. --service sonalyze");
+
+  const slug = String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? "")
+    .trim()
+    .toLowerCase();
+  if (!slug || !/^[a-z0-9_-]+$/.test(slug)) {
+    fail("--service must be this service's Daywalker slug (e.g. --service sonalyze)");
+  }
+
+  const rawDomain = opts.domain ? String(opts.domain) : existing.get("DAYWALKER_DOMAIN") ?? process.env.DAYWALKER_DOMAIN ?? "";
+  let domain: string | null = null;
+  if (rawDomain) {
+    domain = publicHostname(rawDomain);
+    if (!domain) fail(`--domain (${rawDomain}) is not a valid public hostname`);
+  }
+
+  const apiKey = String(opts["api-key"] ?? existing.get("DAYWALKER_API_KEY") ?? process.env.DAYWALKER_API_KEY ?? "").trim() || null;
+  const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
 
   const keyExists = Boolean(existing.get("DAYWALKER_SIGNING_KEY")) && !opts.force;
-  const key = keyExists ? null : generateSigningKey();
+  const key = keyExists ? null : await generateSigningKey();
 
-  const framework = (opts.framework as string) || detectFramework(dir);
-  let routeNote: string;
-  if (framework === "next") routeNote = addNextRoute(dir);
-  else if (framework === "express") routeNote = `add app.use(daywalkerKeys()) from "@shelbyb/daywalker-sdk/express" before your routes`;
-  else routeNote = `serve GET /.well-known/daywalker-keys.json with daywalker().keys() (see the SDK README)`;
+  const activeKey = key ?? (existing.get("DAYWALKER_SIGNING_KEY") ? await loadSigningKey(existing.get("DAYWALKER_SIGNING_KEY")!) : null);
+  const kid = activeKey?.publicJwk.kid ?? String(opts["key-id"] ?? "");
 
-  writeEnvFile(envFile, {
+  // Register public key directly with Daywalker Auth if API key is provided
+  let registered = false;
+  if (apiKey && activeKey && !opts["skip-register"]) {
+    if (!isJson) console.log(`• Registering public key (${activeKey.publicJwk.kid}) with Daywalker Auth...`);
+    const regResult = await registerPublicKey({
+      authUrl,
+      apiKey,
+      serviceSlug: slug,
+      domain,
+      publicJwk: activeKey.publicJwk,
+    });
+    if (regResult.ok) {
+      registered = true;
+      if (!isJson) console.log(`✔ Public key registered with Daywalker Auth (Push Architecture)`);
+    } else {
+      if (!isJson) {
+        console.warn(redactSecrets(`! Key registration warning (${regResult.status}): ${regResult.error}`));
+        console.warn(`  You can register the key later by re-running init with your DAYWALKER_API_KEY.`);
+      }
+    }
+  } else if (!apiKey && !opts["skip-register"] && !isJson) {
+    console.log(`• Note: Set DAYWALKER_API_KEY in .env.local to automatically register public keys.`);
+  }
+
+  const signingKeyStr = key?.privateKeyPkcs8Base64 ?? existing.get("DAYWALKER_SIGNING_KEY") ?? "";
+
+  const envValues: Record<string, string | null> = {
     DAYWALKER_SERVICE_SLUG: slug,
-    DAYWALKER_DOMAIN: domain,
-    ...(key ? { DAYWALKER_SIGNING_KEY: key.privateKey } : {}),
-  });
+    DAYWALKER_KEY_ID: kid,
+    DAYWALKER_AUTH_URL: authUrl,
+    ...(domain ? { DAYWALKER_DOMAIN: domain } : {}),
+    ...(apiKey ? { DAYWALKER_API_KEY: apiKey } : {}),
+    ...(signingKeyStr ? { DAYWALKER_SIGNING_KEY: signingKeyStr } : {}),
+  };
+
+  if (isJson) {
+    console.log(JSON.stringify(envValues, null, 2));
+    return;
+  }
+
+  writeEnvFile(envFile, envValues);
   ensureGitignored(dir, ".env.local");
 
-  console.log(`✔ Daywalker configured for ${domain} (service "${slug}")`);
-  console.log(`  • ${routeNote}`);
-  console.log(`  • .env.local: DAYWALKER_SERVICE_SLUG, DAYWALKER_DOMAIN${key ? ", DAYWALKER_SIGNING_KEY" : " (kept existing signing key)"}`);
-  if (key) console.log(`  • key id ${key.publicJwk.kid}`);
+  console.log(`✔ Daywalker configured for service "${slug}"${domain ? ` (${domain})` : ""}`);
+  console.log(`  • RFC 9421 / RFC 9530 HTTP Message Signing active`);
+  console.log(`  • .env.local: DAYWALKER_SERVICE_SLUG, DAYWALKER_KEY_ID, DAYWALKER_AUTH_URL${domain ? ", DAYWALKER_DOMAIN" : ""}${apiKey ? ", DAYWALKER_API_KEY" : ""}${signingKeyStr ? ", DAYWALKER_SIGNING_KEY" : ""}`);
+  if (kid) console.log(`  • Key ID (RFC 7638 thumbprint): ${kid}`);
+  if (registered) console.log(`  • Zero-ingress push architecture: public key registered directly`);
 
-  if (opts["do-app"]) {
-    const signingKey = key?.privateKey ?? existing.get("DAYWALKER_SIGNING_KEY")!;
-    const appId = setDigitalOceanEnv(String(opts["do-app"]), {
-      DAYWALKER_SERVICE_SLUG: { value: slug, secret: false },
-      DAYWALKER_DOMAIN: { value: domain, secret: false },
-      DAYWALKER_SIGNING_KEY: { value: signingKey, secret: true },
-    });
-    console.log(`  • DigitalOcean app ${appId}: env vars set (signing key encrypted); a redeploy has started`);
-    console.log(`    Pull the updated spec into .do/app.yaml before your next spec deploy, or the key will be removed.`);
-  } else {
-    console.log(`  • Production: set DAYWALKER_SERVICE_SLUG, DAYWALKER_DOMAIN, and DAYWALKER_SIGNING_KEY (as a secret)`);
-    console.log(`    on your host, or re-run with --do-app <name> for DigitalOcean App Platform.`);
-  }
-  if (opts["print-key"] && key) console.log(`\nDAYWALKER_SIGNING_KEY=${key.privateKey}`);
-  console.log(`\nNext: deploy, then run \`npx daywalker check\`, and add ${domain} (or *.${domain.split(".").slice(1).join(".")}) to your token's allowed callers.`);
+  if (opts["print-key"] && signingKeyStr) console.log(`\nDAYWALKER_SIGNING_KEY=${signingKeyStr}`);
 }
 
 async function rotate(opts: Record<string, string | boolean>) {
-  const envFile = path.join(process.cwd(), ".env.local");
+  const isJson = Boolean(opts.json || opts.export);
+  const dir = process.cwd();
+  const envFile = path.join(dir, ".env.local");
   const existing = readEnvFile(envFile);
-  const current = existing.get("DAYWALKER_SIGNING_KEY");
-  if (!current) fail("No DAYWALKER_SIGNING_KEY in .env.local; run `daywalker init` first");
-  const key = generateSigningKey();
-  writeEnvFile(envFile, { DAYWALKER_SIGNING_KEY: key.privateKey, DAYWALKER_SIGNING_KEY_PREVIOUS: current });
-  console.log(`✔ New key ${key.publicJwk.kid} written; the old key stays published as DAYWALKER_SIGNING_KEY_PREVIOUS.`);
-  if (opts["do-app"]) {
-    const appId = setDigitalOceanEnv(String(opts["do-app"]), {
-      DAYWALKER_SIGNING_KEY: { value: key.privateKey, secret: true },
-      DAYWALKER_SIGNING_KEY_PREVIOUS: { value: current, secret: true },
+  const current = existing.get("DAYWALKER_SIGNING_KEY") ?? process.env.DAYWALKER_SIGNING_KEY;
+  if (!current) fail("No DAYWALKER_SIGNING_KEY found; run `daywalker init` first");
+
+  const slug = String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? "").trim().toLowerCase();
+  const apiKey = String(opts["api-key"] ?? existing.get("DAYWALKER_API_KEY") ?? process.env.DAYWALKER_API_KEY ?? "").trim() || null;
+  const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
+
+  const key = await generateSigningKey();
+
+  if (apiKey && slug) {
+    if (!isJson) console.log(`• Registering new public key (${key.publicJwk.kid}) with Daywalker Auth...`);
+    const regResult = await registerPublicKey({
+      authUrl,
+      apiKey,
+      serviceSlug: slug,
+      publicJwk: key.publicJwk,
     });
-    console.log(`  • DigitalOcean app ${appId} updated; a redeploy has started.`);
+    if (regResult.ok) {
+      if (!isJson) console.log(`✔ New public key registered with Daywalker Auth`);
+    } else {
+      if (!isJson) console.warn(redactSecrets(`! Key registration warning: ${regResult.error}`));
+    }
   }
-  console.log(`  After the deploy is live, remove DAYWALKER_SIGNING_KEY_PREVIOUS to retire the old key.`);
-  if (opts["print-key"]) console.log(`\nDAYWALKER_SIGNING_KEY=${key.privateKey}`);
+
+  const envValues = {
+    DAYWALKER_KEY_ID: key.publicJwk.kid,
+    DAYWALKER_SIGNING_KEY: key.privateKeyPkcs8Base64 ?? "",
+    DAYWALKER_SIGNING_KEY_PREVIOUS: current,
+  };
+
+  if (isJson) {
+    console.log(JSON.stringify(envValues, null, 2));
+    return;
+  }
+
+  writeEnvFile(envFile, envValues);
+  console.log(`✔ New key ${key.publicJwk.kid} written; previous key preserved as DAYWALKER_SIGNING_KEY_PREVIOUS.`);
+  console.log(`  After deployment rollout is complete, you may remove DAYWALKER_SIGNING_KEY_PREVIOUS.`);
+
+  if (opts["print-key"]) console.log(`\nDAYWALKER_SIGNING_KEY=${key.privateKeyPkcs8Base64}`);
 }
 
 async function check() {
-  // Merge .env.local over the process env, like Next.js does in development
   const env = { ...process.env, ...Object.fromEntries(readEnvFile(path.join(process.cwd(), ".env.local"))) };
-  const result = await createDaywalker({ env }).selfCheck();
-  console.log(`domain:  ${result.domain ?? "(none)"}`);
-  console.log(`keys:    ${result.keysUrl ?? "(none)"}`);
-  console.log(`signing: ${result.signing ? "yes" : "no"}`);
-  if (result.ok) console.log("✔ Ready: requests will be signed and your key is published.");
-  else {
-    for (const p of result.problems) console.log(`✖ ${p}`);
-    process.exit(1);
+  const client = createDaywalker({ env });
+  const result = await client.selfCheck();
+
+  if (result.ok) {
+    console.log(`✔ Daywalker configuration looks good`);
+    if (result.serviceSlug) console.log(`  • Service slug: ${result.serviceSlug}`);
+    if (result.domain) console.log(`  • Caller domain: ${result.domain}`);
+    if (result.keyId) console.log(`  • Key ID: ${result.keyId}`);
+    if (result.signing) console.log(`  • RFC 9421 signature signing: ready`);
+    if (result.offlineVerificationReady) console.log(`  • Zero-egress offline JWT lease verification: ready`);
+    return;
+  }
+
+  console.error(`✖ Daywalker self-check found problems:`);
+  for (const p of result.problems) console.error(redactSecrets(`  - ${p}`));
+  process.exit(1);
+}
+
+async function main() {
+  const [cmd, ...rest] = process.argv.slice(2);
+  const parsedArgs = args(rest);
+
+  if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
+    console.log(HELP);
+    return;
+  }
+
+  if (cmd === "init") {
+    await init(parsedArgs);
+  } else if (cmd === "rotate") {
+    await rotate(parsedArgs);
+  } else if (cmd === "check") {
+    await check();
+  } else {
+    fail(`Unknown command "${cmd}". Run \`daywalker --help\` for usage.`);
   }
 }
 
-const [command, ...rest] = process.argv.slice(2);
-const opts = args(rest);
-const commands: Record<string, (o: typeof opts) => Promise<void>> = { init, rotate, check };
-if (!command || !commands[command] || opts.help) {
-  console.log(HELP);
-  process.exit(command && !opts.help ? 1 : 0);
-}
-commands[command](opts).catch((err) => fail((err as Error).message));
+main().catch((err) => {
+  console.error(redactSecrets(String((err as Error)?.stack || err)));
+  process.exit(1);
+});

@@ -1,104 +1,209 @@
+<p align="center">
+  <img src="https://cdn.daywalker.dev/assets/images/icon/daywalker-icon-transparent-512x512.jpeg" alt="Daywalker" width="160" />
+</p>
+
 # @shelbyb/daywalker-sdk
 
-Connect any service to [Daywalker Auth](https://auth.daywalker.dev): validate API tokens and make **domain-signed** API calls that pass token allowlists from any host, CDN, container, or serverless platform.
+Zero-dependency, runtime-agnostic client library for [Daywalker Auth](https://auth.daywalker.dev). Supports **RFC 9421 (HTTP Message Signatures)**, **RFC 9530 (Digest Fields)**, **Web Crypto standards**, **Push Architecture key registration**, and **hardened web & Next.js middleware**.
+
+Runs seamlessly across **Node.js 18+**, **Bun**, **Deno**, **Cloudflare Workers**, **Next.js Edge**, and standard browser runtimes.
+
+- **Zero-Dependency Web Standards Core**: 100% standard `crypto.subtle`, `Uint8Array`, `fetch`, `Request`, and `Response`.
+- **RFC 9421 (HTTP Message Signatures)**: Cryptographically binds `@method`, `@path`, `@authority`, and `content-digest` using Ed25519 signatures (`Signature-Input`, `Signature`).
+- **RFC 9530 (Digest Fields)**: Computes standard `Content-Digest: sha-256=:<base64>:` headers for payload integrity.
+- **Class-Based Client Architecture**: Instantiable `Daywalker` client supporting dependency injection, with a lazy default singleton for plug-and-play simplicity.
+- **Resilience & Rate Limiting**: Automatic exponential backoff with jitter and `Retry-After` header parsing directly inside client fetch requests.
+- **Deterministic Type-Safe Results**: Discriminated union returns (`Result<T, E>`) for clean handling without try/catch boilerplate.
+- **Security-Hardened Next.js Middleware**: Built-in Server Action probe mitigation (CVE-2025-55182 defense), health check bypass, and self-healing diagnostic error routing.
+- **Zero-Egress Inbound Verification**: In-memory caching (60–300s TTL) and offline JWT token lease validation using Daywalker's asymmetric public key.
+- **Decoupled Push Architecture CLI**: `npx daywalker init --json` registers keys directly via `POST /api/v1/keys/register` with zero runtime reverse-HTTP calls.
+
+---
+
+## Installation
+
+```bash
+npm install @shelbyb/daywalker-sdk
+```
+
+---
 
 ## Setup (once per service)
 
 ```bash
-npm install @shelbyb/daywalker-sdk
-npx daywalker init --domain myservice.daywalker.dev --service my-service-slug
-# On DigitalOcean App Platform, also set the env vars on the live app:
-npx daywalker init --domain myservice.daywalker.dev --service my-service-slug --do-app my-app
+# Generate Ed25519 keypair and write .env.local
+npx daywalker init --service my-service-slug
+
+# Or register the public key immediately with Daywalker Auth:
+npx daywalker init --service my-service-slug --api-key srv_live_...
+
+# Pipe JSON secrets directly into Vercel, Fly.io, DigitalOcean, or AWS SSM:
+npx daywalker init --service my-service-slug --api-key srv_live_... --json
 ```
 
-`init`:
-- generates an Ed25519 signing key
-- adds the `/.well-known/daywalker-keys.json` route (Next.js; for Express it prints the one line to add)
-- writes `DAYWALKER_SERVICE_SLUG`, `DAYWALKER_DOMAIN`, and `DAYWALKER_SIGNING_KEY` to `.env.local` (git-ignored)
-- with `--do-app`, sets them on your DigitalOcean app through `doctl`, with the key as an encrypted secret
+`daywalker init`:
+- Generates an Ed25519 keypair locally using WebCrypto (`crypto.subtle`)
+- Registers the public JWK directly with `POST https://auth.daywalker.dev/api/v1/keys/register`
+- Writes `DAYWALKER_SERVICE_SLUG`, `DAYWALKER_KEY_ID`, `DAYWALKER_SIGNING_KEY`, and `DAYWALKER_AUTH_URL` to `.env.local`
+- No route injectors or public `/.well-known/` endpoints needed
 
 The private key is never printed unless you pass `--print-key`.
 
-Then set `DAYWALKER_API_KEY` to the service's token, deploy, run `npx daywalker check`, and in the Daywalker dashboard click **Connect** on the token to add your domain to its allowed callers.
+---
 
 ## Environment
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DAYWALKER_API_KEY` | ✅ | The service's Daywalker API token (`srv_live_…`) |
-| `DAYWALKER_SERVICE_SLUG` | ✅ | The service slug to validate against. Each service sets its own |
-| `DAYWALKER_SIGNING_KEY` | for allowlisted tokens | Ed25519 private key from `daywalker init` (secret) |
-| `DAYWALKER_DOMAIN` | recommended | Public hostname that serves the key. Falls back to `APP_URL`, `NEXTAUTH_URL`, `NEXT_PUBLIC_APP_URL`, `BETTER_AUTH_URL`, `PUBLIC_URL`, `SITE_URL`, `URL`, `VERCEL_PROJECT_PRODUCTION_URL`, `RENDER_EXTERNAL_HOSTNAME`, `RAILWAY_PUBLIC_DOMAIN`, `VERCEL_URL` |
-| `DAYWALKER_SIGNING_KEY_PREVIOUS` | during rotation | Old key, still published so in-flight requests verify |
+| `DAYWALKER_API_KEY` | ✅ | The service's Daywalker API token (`srv_live_…`) or JWT lease |
+| `DAYWALKER_SERVICE_SLUG` | ✅ | The service slug to validate against (e.g. `sonalyze`) |
+| `DAYWALKER_SIGNING_KEY` | for signed requests | Ed25519 private key from `daywalker init` (PKCS#8 Base64 DER or PEM) |
+| `DAYWALKER_KEY_ID` | optional | RFC 7638 JWK thumbprint derived during key generation |
+| `DAYWALKER_SIGNING_KEY_PREVIOUS` | during rotation | Previous private key, maintained during deployment transitions |
+| `DAYWALKER_DOMAIN` | optional | Optional caller identifier or host domain name |
+| `DAYWALKER_PUBLIC_KEY` | optional | Daywalker Auth public key for zero-egress offline JWT lease verification |
 | `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev` |
 
-Internal addresses (`0.0.0.0`, `localhost`, IPs) are never used as the domain, so a container's bind address can't end up in a signature.
+---
 
 ## Usage
 
-```ts
-import { daywalker } from "@shelbyb/daywalker-sdk";
-
-// Validate DAYWALKER_API_KEY for DAYWALKER_SERVICE_SLUG (successful results cached for 60s)
-const result = await daywalker().validateToken();
-if (!result.valid) console.error(result.status, result.data.message);
-
-// Or validate a token your own users send you
-await daywalker().requireValidToken({ token: req.headers["x-api-token"] }); // throws DaywalkerError
-
-// Signed call to any Daywalker Auth API path
-const res = await daywalker().fetch("/api/v1/tokens/validate", { body: { token, serviceSlug: "other" } });
-```
-
-`result.data` includes `rateLimit` (per minute) and `rateLimitHourly` (per hour), each `{ limit, remaining, reset }`. On a `429`, `result.retryAfter` is the number of seconds to wait.
-
-### Serving the public key
-
-Next.js (App Router), which `init` creates for you:
+### Client Class & Instantiation
 
 ```ts
-// app/.well-known/daywalker-keys.json/route.ts
-export { GET, dynamic } from "@shelbyb/daywalker-sdk/next";
+import { Daywalker, daywalker } from "@shelbyb/daywalker-sdk";
+
+// Option 1: Instantiable client with custom options / dependency injection
+const client = new Daywalker({
+  apiKey: process.env.DAYWALKER_API_KEY,
+  serviceSlug: "sonalyze",
+  maxRetries: 3,
+});
+
+// Option 2: Default lazy singleton (reads process.env automatically)
+const result = await daywalker.validateToken();
+
+if (result.ok) {
+  console.log("Validated tenant:", result.data.tenantId);
+  console.log("Rate limit remaining:", result.data.rateLimit.remaining);
+} else {
+  console.error(`Validation failed (${result.status} ${result.error}): ${result.message}`);
+}
 ```
 
-Express / Connect / Node http:
+### Type-Safe Verification & Error Handling
 
 ```ts
-import { daywalkerKeys } from "@shelbyb/daywalker-sdk/express";
-app.use(daywalkerKeys());
+// requireValidToken returns data or throws DaywalkerAuthError / DaywalkerRateLimitError
+try {
+  const auth = await client.requireValidToken(req.headers.get("x-api-token"));
+  console.log("Authenticated service:", auth.serviceSlug);
+} catch (err) {
+  if (err instanceof DaywalkerRateLimitError) {
+    console.warn(`Rate limited. Retry after ${err.retryAfter}s`);
+  }
+}
 ```
 
-Anything else: serve `JSON.stringify(daywalker().keys())` at `GET /.well-known/daywalker-keys.json`. It must be on the domain itself over HTTPS, without redirects.
-
-### Custom clients
+### RFC 9421 Signed Requests with Automatic Backoff
 
 ```ts
-import { createDaywalker } from "@shelbyb/daywalker-sdk";
-const client = createDaywalker({ serviceSlug: "gigpulse", domain: "gigpulse.daywalker.dev", cacheTtlMs: 0 });
+// Outbound request automatically computes Content-Digest (RFC 9530)
+// and attaches RFC 9421 signature headers. Retries 429 rate limits automatically.
+const res = await client.fetch("/api/v1/tokens/validate", {
+  method: "POST",
+  body: { token: "user_token", serviceSlug: "other-service" },
+});
 ```
 
-## Commands
+---
 
-| Command | Does |
+## Hardened Next.js Middleware (`@shelbyb/daywalker-sdk/next`)
+
+```ts
+// middleware.ts
+import { createDaywalkerMiddleware } from "@shelbyb/daywalker-sdk/next";
+
+export const middleware = createDaywalkerMiddleware({
+  serviceSlug: "sonalyze",
+  errorPath: "/service-error", // redirect unauthorized web visitors
+  validateServerActions: true, // drops malformed CVE-2025-55182 scanner probes
+});
+
+export const config = {
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+};
+```
+
+### Route Handler Wrapper
+
+```ts
+// app/api/protected/route.ts
+import { withDaywalkerAuth } from "@shelbyb/daywalker-sdk/next";
+
+export const POST = withDaywalkerAuth(async (req, { auth }) => {
+  return Response.json({ message: "Hello " + auth.serviceSlug, auth });
+});
+```
+
+---
+
+## Web Standard & Hono Middleware (`@shelbyb/daywalker-sdk/middleware`)
+
+```ts
+import { Hono } from "hono";
+import { daywalkerAuth } from "@shelbyb/daywalker-sdk/middleware";
+
+const app = new Hono();
+app.use("/api/*", daywalkerAuth());
+
+app.get("/api/me", (c) => {
+  const auth = c.get("auth");
+  return c.json({ auth });
+});
+```
+
+---
+
+## Zero-Egress Offline Verification
+
+When high-throughput internal microservices need zero latency and zero external egress, Daywalker Auth can issue asymmetric JWT leases. Configure `DAYWALKER_PUBLIC_KEY` (PEM or standard JWK) and token validation runs entirely in memory without network calls:
+
+```ts
+import { Daywalker } from "@shelbyb/daywalker-sdk";
+
+const client = new Daywalker({
+  serviceSlug: "myservice",
+  daywalkerPublicKey: process.env.DAYWALKER_PUBLIC_KEY,
+});
+
+// Verifies JWT signature, expiration, and service claims locally
+const result = await client.validateToken(incomingJwt);
+```
+
+---
+
+## CLI Reference
+
+| Command | Description |
 |---|---|
-| `npx daywalker init --domain <host> --service <slug> [--do-app <app>]` | Generate a key, add the key route, write env (re-running keeps the existing key; `--force` replaces it) |
-| `npx daywalker check` | Validate config and confirm the domain publishes the current key |
-| `npx daywalker rotate [--do-app <app>]` | New key; the old one stays published as `DAYWALKER_SIGNING_KEY_PREVIOUS`. Remove that after the deploy is live |
+| `npx daywalker init --service <slug> [--api-key <key>] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
+| `npx daywalker check` | Validate configuration, signature readiness, and connection |
+| `npx daywalker rotate [--api-key <key>] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
 
-## How signing works
+---
 
-Each request carries `X-Daywalker-Domain`, `-Key-Id`, `-Timestamp`, `-Nonce`, and `-Signature`, an Ed25519 signature over the method, path, domain, timestamp, nonce, and the body's SHA-256. Daywalker fetches the public key from your domain over HTTPS, so a valid signature proves the request comes from whoever controls the domain. Timestamps must be within 5 minutes and nonces are single-use. The exact protocol is pinned by [`test-vectors/signing-v1.json`](./test-vectors/signing-v1.json); the Daywalker Auth server tests against the same file.
+## Request Signing Specification (RFC 9421 & RFC 9530)
 
-## Development
+Each outbound request signed by `@shelbyb/daywalker-sdk` includes:
+- `Content-Digest: sha-256=:<base64-encoded-hash>:`
+- `Signature-Input: sig1=("@method" "@path" "@authority" "content-digest");created=<unix_seconds>;keyid="<kid>";alg="ed25519"`
+- `Signature: sig1=:<base64-encoded-signature>:`
+- `Authorization: Bearer <DAYWALKER_API_KEY>`
 
-```bash
-npm install
-npm test        # builds, then runs the tests (including the shared signing test vectors)
-```
+The exact signature base and test cases are verified against [`test-vectors/signing-rfc9421.json`](./test-vectors/signing-rfc9421.json).
 
-Releases: bump `version` in `package.json`, merge to `main`, then `git tag v<version> && git push origin v<version>`. The publish workflow runs the tests and publishes to npm with provenance.
-
-**Changing the signing protocol?** `test-vectors/signing-v1.json` is the contract with the Daywalker Auth server, which verifies the same vectors. Never change existing cases; a new protocol version gets a new `daywalker-v2` file, and the server must accept it before the SDK sends it.
+---
 
 ## License
 
