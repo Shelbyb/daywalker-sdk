@@ -1,0 +1,51 @@
+{
+  "description": "Daywalker RFC 9421 HTTP Message Signatures test vectors. Shared by the SDK and the Daywalker Auth server; both must reproduce these exactly. The key is public and for tests only.",
+  "version": "rfc9421",
+  "privateKeyPkcs8Base64": "MC4CAQAwBQYDK2VwBCIEIKOir9Mm0GOBaPDIFyKgsntHgvl66sBqNA0trSBZfSp4",
+  "publicJwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "x": "0udnw7H-41F93Cdlerf_8PQ1eu30XrwLNopgnMtc5v4",
+    "kid": "ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg",
+    "use": "sig",
+    "alg": "EdDSA"
+  },
+  "cases": [
+    {
+      "name": "validate",
+      "method": "POST",
+      "path": "/api/v1/tokens/validate",
+      "authority": "auth.daywalker.dev",
+      "timestamp": 1791561600,
+      "body": "{\"token\":\"srv_live_vector_example_token_0000000000000000\",\"serviceSlug\":\"sonalyze\"}",
+      "contentDigest": "sha-256=:w0uhe7B7JieIenljhLSRhe4Dx2v2xsNekqFCzy6VA6E=:",
+      "signatureParams": "(\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561600;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signatureBase": "\"@method\": POST\n\"@path\": /api/v1/tokens/validate\n\"@authority\": auth.daywalker.dev\n\"content-digest\": sha-256=:w0uhe7B7JieIenljhLSRhe4Dx2v2xsNekqFCzy6VA6E=:\n\"@signature-params\": (\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561600;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signature": "sig1=:BjbcX3foJ0yDTa+II8NMz0T4lA80pZAGJPz+Iivst+Tz0DEZxF1KpKMH0AUnGbKLciwPeV/s76Le1fmr7ERvDQ==:"
+    },
+    {
+      "name": "empty-body-get",
+      "method": "GET",
+      "path": "/api/v1/services",
+      "authority": "auth.daywalker.dev",
+      "timestamp": 1791561601,
+      "body": "",
+      "contentDigest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+      "signatureParams": "(\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561601;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signatureBase": "\"@method\": GET\n\"@path\": /api/v1/services\n\"@authority\": auth.daywalker.dev\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"@signature-params\": (\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561601;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signature": "sig1=:w+vzaRmAWKaos6LNHQUqydjUKGodvHxjoopzr5Ms+B5hihj5CkDfSwtGXuakCZOLenZ4/5mL7CjsQrBqehMMAg==:"
+    },
+    {
+      "name": "unicode-body",
+      "method": "POST",
+      "path": "/api/v1/tokens/validate",
+      "authority": "auth.daywalker.dev",
+      "timestamp": 1791561602,
+      "body": "{\"note\":\"héllo ✓\"}",
+      "contentDigest": "sha-256=:vD4SP1vx++VS7R631pQ5kIiL10GhdN+irulBzjACv2M=:",
+      "signatureParams": "(\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561602;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signatureBase": "\"@method\": POST\n\"@path\": /api/v1/tokens/validate\n\"@authority\": auth.daywalker.dev\n\"content-digest\": sha-256=:vD4SP1vx++VS7R631pQ5kIiL10GhdN+irulBzjACv2M=:\n\"@signature-params\": (\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561602;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signature": "sig1=:eTXMD+2/cX9axV31se7n8+U7Zys+eHAAThlsECksfDagr7B6Ljybd4lUmKpdwplcIVj4tHxhm1NIwddJUQS6BA==:"
+    }
+  ]
+}

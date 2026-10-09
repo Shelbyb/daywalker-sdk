@@ -14,6 +14,10 @@
       "types": "./dist/next.d.ts",
       "import": "./dist/next.js"
     },
+    "./middleware": {
+      "types": "./dist/middleware.d.ts",
+      "import": "./dist/middleware.js"
+    },
     "./express": {
       "types": "./dist/express.d.ts",
       "import": "./dist/express.js"
@@ -24,6 +28,7 @@
   },
   "files": [
     "dist",
+    "assets",
     "README.md",
     "LICENSE"
   ],
