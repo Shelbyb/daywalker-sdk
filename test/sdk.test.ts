@@ -179,7 +179,7 @@ describe("Public key direct registration (Push Architecture)", () => {
 
     assert.strictEqual(res.ok, true);
     assert.strictEqual(authHeader, "Bearer srv_live_reg_token");
-    assert.strictEqual(sentPayload.serviceSlug, "testservice");
+    assert.strictEqual(sentPayload.domain, "testservice.daywalker.dev");
     assert.strictEqual(sentPayload.keyId, key.publicJwk.kid);
     assert.strictEqual(sentPayload.publicKey.x, key.publicJwk.x);
   });
