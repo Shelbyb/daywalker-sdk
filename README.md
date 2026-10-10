@@ -210,9 +210,11 @@ Inbound tokens may be supplied as `x-api-token: srv_live_...` or `Authorization:
 
 Each outbound request signed by `@shelbyb/daywalker-sdk` includes:
 - `Content-Digest: sha-256=:<base64-encoded-hash>:`
-- `Signature-Input: sig1=("@method" "@path" "@authority" "content-digest");created=<unix_seconds>;keyid="<kid>";alg="ed25519"`
+- `Signature-Input: sig1=("@method" "@path" "@authority" "content-digest");created=<unix_seconds>;keyid="<kid>";alg="ed25519";nonce="<random>"`
 - `Signature: sig1=:<base64-encoded-signature>:`
 - `Authorization: Bearer <DAYWALKER_API_KEY>`
+
+A fresh random `nonce` is generated for every attempt (including retries), so identical requests in the same second still produce unique signatures and never trip replay protection. `validateToken()` also shares one in-flight request between concurrent callers for the same token, and briefly caches failures (`negativeCacheTtlMs`, default 3000ms; 429s and network errors are never cached).
 
 The exact signature base and test cases are verified against [`test-vectors/signing-rfc9421.json`](./test-vectors/signing-rfc9421.json).
 
