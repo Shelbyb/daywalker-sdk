@@ -220,6 +220,29 @@ The exact signature base and test cases are verified against [`test-vectors/sign
 
 ---
 
+## DevPulse SDKs (one package)
+
+The same package ships the [DevPulse](https://github.com/shelbyb/devpulse) client SDKs as subpath exports. Each subpath is tree-shakeable and has zero dependencies; `react` and the OpenFeature SDKs are optional peer dependencies used only by their subpaths.
+
+| Import | What it is | Docs |
+|---|---|---|
+| `@shelbyb/daywalker-sdk/flags` | Feature flags for browsers and JS clients, real-time over SSE | [docs/flags.md](./docs/flags.md) |
+| `@shelbyb/daywalker-sdk/flags/node` | Server-side flags with local evaluation and streaming updates | [docs/flags-node.md](./docs/flags-node.md) |
+| `@shelbyb/daywalker-sdk/flags/react` | React provider and hooks (SSR bootstrap, no flicker) | [docs/flags-react.md](./docs/flags-react.md) |
+| `@shelbyb/daywalker-sdk/flags/engine` | The deterministic evaluation engine (advanced / testing) | — |
+| `@shelbyb/daywalker-sdk/openfeature/server`, `/openfeature/web` | OpenFeature providers | [docs/openfeature.md](./docs/openfeature.md) |
+| `@shelbyb/daywalker-sdk/analytics` | Product analytics: events, page views, identify, sessions (browser and Node) | [docs/analytics.md](./docs/analytics.md) |
+
+```ts
+import { createClient } from "@shelbyb/daywalker-sdk/flags";
+import { createAnalytics } from "@shelbyb/daywalker-sdk/analytics";
+
+const flags = createClient(clientSideId, { kind: "user", key: user.id }, { baseUrl: "https://devpulse.example.com" });
+const analytics = createAnalytics({ writeKey: "dpa_…", host: "https://devpulse.example.com", flags }); // events carry $feature/<key>
+```
+
+---
+
 ## License
 
 MIT
