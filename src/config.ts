@@ -11,6 +11,7 @@ export interface ResolvedConfig {
   daywalkerPublicKey: string | PublicJwk | null;
   authUrl: string;
   cacheTtlMs: number;
+  negativeCacheTtlMs: number;
   maxRetries: number;
   problems: string[];
 }
@@ -98,6 +99,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const daywalkerPublicKey = options.daywalkerPublicKey ?? (env.DAYWALKER_PUBLIC_KEY ? env.DAYWALKER_PUBLIC_KEY.trim() : null);
   const authUrl = (options.authUrl ?? env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
   const cacheTtlMs = options.cacheTtlMs ?? 60_000;
+  const negativeCacheTtlMs = options.negativeCacheTtlMs ?? 3_000;
   const maxRetries = options.maxRetries ?? (options.retry?.maxRetries ?? 3);
 
   return {
@@ -111,6 +113,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     daywalkerPublicKey,
     authUrl,
     cacheTtlMs,
+    negativeCacheTtlMs,
     maxRetries,
     problems,
   };
