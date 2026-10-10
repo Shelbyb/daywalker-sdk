@@ -375,6 +375,30 @@ export class Daywalker {
   }
 
   /**
+   * Exchanges an RFC 9421 signed request for a short-lived EdDSA JWT lease (POST /api/v1/leases/issue).
+   */
+  public async issueLease(ttlSeconds?: number): Promise<{ lease: string; tokenType?: string; expiresAt?: string; jwksUri?: string }> {
+    const res = await this.fetch("/api/v1/leases/issue", {
+      method: "POST",
+      body: ttlSeconds ? { ttlSeconds } : {},
+    });
+    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (res.status !== 201 && res.status !== 200) {
+      throw new DaywalkerAuthError(redactSecrets(String(json.message || json.error || `Lease issue failed with HTTP ${res.status}`)), res.status, json.error as string | undefined);
+    }
+    return json as { lease: string; tokenType?: string; expiresAt?: string; jwksUri?: string };
+  }
+
+  /**
+   * Fetches Daywalker's public JWKS (GET /.well-known/jwks.json) for offline lease verification.
+   */
+  public async fetchJwks(): Promise<{ keys: PublicJwk[] }> {
+    const res = await globalThis.fetch(`${this._config.authUrl.replace(/\/+$/, "")}/.well-known/jwks.json`, { headers: { Accept: "application/json" } });
+    if (!res.ok) throw new DaywalkerError(`Could not fetch JWKS (HTTP ${res.status})`, res.status);
+    return (await res.json()) as { keys: PublicJwk[] };
+  }
+
+  /**
    * The public JWK(s) configured for this service.
    */
   public async keys(): Promise<{ keys: PublicJwk[] }> {

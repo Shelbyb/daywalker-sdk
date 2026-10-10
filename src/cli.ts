@@ -175,6 +175,7 @@ async function rotate(opts: Record<string, string | boolean>) {
   const apiKey = String(opts["api-key"] ?? existing.get("DAYWALKER_API_KEY") ?? process.env.DAYWALKER_API_KEY ?? "").trim() || null;
   const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
 
+  const rotateDomain = publicHostname(String(opts.domain ?? existing.get("DAYWALKER_DOMAIN") ?? process.env.DAYWALKER_DOMAIN ?? ""));
   const key = await generateSigningKey();
 
   if (apiKey && slug) {
@@ -183,6 +184,7 @@ async function rotate(opts: Record<string, string | boolean>) {
       authUrl,
       apiKey,
       serviceSlug: slug,
+      domain: rotateDomain,
       publicJwk: key.publicJwk,
     });
     if (regResult.ok) {

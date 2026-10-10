@@ -400,6 +400,10 @@ export async function registerPublicKey(params: {
   const registerUrl = `${authUrl}/api/v1/keys/register`;
   const doFetch = params.fetchFn ?? globalThis.fetch;
 
+  if (!params.domain) {
+    return { ok: false, status: 400, error: "domain is required to register a key (set --domain or DAYWALKER_DOMAIN)" };
+  }
+
   try {
     const res = await doFetch(registerUrl, {
       method: "POST",
@@ -410,8 +414,7 @@ export async function registerPublicKey(params: {
       },
       body: JSON.stringify({
         keyId: params.publicJwk.kid,
-        domain: params.domain ?? undefined,
-        serviceSlug: params.serviceSlug ?? undefined,
+        domain: params.domain,
         publicKey: params.publicJwk,
       }),
     });
