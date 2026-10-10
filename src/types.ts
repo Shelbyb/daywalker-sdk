@@ -75,6 +75,8 @@ export interface DaywalkerConfig {
   daywalkerPublicKey?: string | PublicJwk;
   authUrl?: string;
   cacheTtlMs?: number;
+  /** Short cache for failed validations (not 429/network errors). Default 3000ms; 0 disables. */
+  negativeCacheTtlMs?: number;
   maxRetries?: number;
   retry?: RetryOptions;
   fetch?: typeof fetch;

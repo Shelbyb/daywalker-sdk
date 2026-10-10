@@ -509,3 +509,88 @@ describe("Decoupled CLI", () => {
     }
   });
 });
+
+describe("Nonce, in-flight dedupe and negative cache", () => {
+  it("dedupes concurrent validateToken calls into one fetch", async () => {
+    const key = await generateSigningKey();
+    let calls = 0;
+    const client = new Daywalker({
+      apiKey: "srv_live_x",
+      serviceSlug: "sonalyze",
+      signingKey: key.privateKeyPkcs8Base64,
+      fetch: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 20));
+        return Response.json({ valid: true, tenantId: "t1" });
+      },
+    });
+    const results = await Promise.all([client.validateToken("tok"), client.validateToken("tok"), client.validateToken("tok")]);
+    assert.strictEqual(calls, 1);
+    assert.ok(results.every((r) => r.ok));
+  });
+
+  it("produces different signatures for sequential requests in the same second", async () => {
+    const key = await generateSigningKey();
+    const sigs: string[] = [];
+    const inputs: string[] = [];
+    const client = new Daywalker({
+      apiKey: "srv_live_x",
+      serviceSlug: "sonalyze",
+      signingKey: key.privateKeyPkcs8Base64,
+      fetch: async (_u, init) => {
+        const h = new Headers(init?.headers);
+        sigs.push(h.get("signature")!);
+        inputs.push(h.get("signature-input")!);
+        return Response.json({ ok: true });
+      },
+    });
+    await client.fetch("/api/v1/tokens/validate", { method: "POST", body: { a: 1 } });
+    await client.fetch("/api/v1/tokens/validate", { method: "POST", body: { a: 1 } });
+    assert.notStrictEqual(sigs[0], sigs[1]);
+    assert.match(inputs[0], /;nonce="[A-Za-z0-9_-]+"/);
+  });
+
+  it("uses a fresh nonce when retrying after 429", async () => {
+    const key = await generateSigningKey();
+    const inputs: string[] = [];
+    const client = new Daywalker({
+      apiKey: "srv_live_x",
+      signingKey: key.privateKeyPkcs8Base64,
+      fetch: async (_u, init) => {
+        inputs.push(new Headers(init?.headers).get("signature-input")!);
+        return inputs.length === 1
+          ? new Response("{}", { status: 429, headers: { "retry-after": "0" } })
+          : Response.json({ ok: true });
+      },
+    });
+    await client.fetch("/api/v1/tokens/validate", {
+      method: "POST",
+      body: { a: 1 },
+      retry: { initialDelayMs: 1, jitter: false },
+    });
+    assert.strictEqual(inputs.length, 2);
+    const n = inputs.map((i) => i.match(/nonce="([^"]+)"/)![1]);
+    assert.notStrictEqual(n[0], n[1]);
+  });
+
+  it("negative-caches failures for the TTL then re-fetches", async () => {
+    let calls = 0;
+    const client = new Daywalker({
+      apiKey: "srv_live_x",
+      serviceSlug: "sonalyze",
+      negativeCacheTtlMs: 40,
+      fetch: async () => {
+        calls++;
+        return Response.json({ valid: false, message: "bad token" }, { status: 401 });
+      },
+    });
+    const a = await client.validateToken("tok");
+    const b = await client.validateToken("tok");
+    assert.strictEqual(a.ok, false);
+    assert.strictEqual(b.ok, false);
+    assert.strictEqual(calls, 1);
+    await new Promise((r) => setTimeout(r, 60));
+    await client.validateToken("tok");
+    assert.strictEqual(calls, 2);
+  });
+});

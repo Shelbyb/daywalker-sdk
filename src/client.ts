@@ -35,6 +35,14 @@ function parseRetryAfter(headerValue: string | null): number | undefined {
   return undefined;
 }
 
+function generateNonce(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 export type DaywalkerFetchInit = Omit<RequestInit, "body"> & {
   body?: BodyInit | object | null;
   retry?: RetryOptions;
@@ -45,6 +53,7 @@ export class Daywalker {
   private readonly _rawConfig: DaywalkerConfig;
   private _signingKeyPromise?: Promise<SigningKey>;
   private readonly _cache = new Map<string, { result: ValidateResult; expiresAt: number }>();
+  private readonly _inflight = new Map<string, Promise<ValidateResult>>();
 
   constructor(config: DaywalkerConfig = {}) {
     this._rawConfig = config;
@@ -141,6 +150,7 @@ export class Daywalker {
           key: signingKey,
           keyid: this._config.keyId ?? undefined,
           apiKey: this._config.apiKey ?? undefined,
+          nonce: generateNonce(),
         });
 
         for (const [k, v] of Object.entries(signedHeaders)) {
@@ -283,7 +293,25 @@ export class Daywalker {
       };
     }
 
-    // Online verification
+    // Online verification, deduplicated across concurrent callers
+    const inflightKey = `${cacheKey}`;
+    const pending = this._inflight.get(inflightKey);
+    if (pending) return pending;
+    const run = this._validateOnline(token, serviceSlug, cacheKey).finally(() => {
+      this._inflight.delete(inflightKey);
+    });
+    this._inflight.set(inflightKey, run);
+    return run;
+  }
+
+  private async _validateOnline(token: string, serviceSlug: string, cacheKey: string): Promise<ValidateResult> {
+    const negTtl = this._config.negativeCacheTtlMs;
+    const fail = (result: Extract<ValidateResult, { ok: false }>): ValidateResult => {
+      if (negTtl > 0 && result.error !== "RATE_LIMITED" && result.error !== "NETWORK_ERROR") {
+        this._cache.set(cacheKey, { result, expiresAt: Date.now() + negTtl });
+      }
+      return result;
+    };
     try {
       const validateBody: Record<string, string> = { token };
       if (serviceSlug) {
@@ -341,12 +369,12 @@ export class Daywalker {
         error = "REVOKED";
       }
 
-      return {
+      return fail({
         ok: false,
         error,
         status: res.status,
         message: redactSecrets(errMsg || `Validation failed with HTTP ${res.status}`),
-      };
+      });
     } catch (err) {
       return {
         ok: false,
