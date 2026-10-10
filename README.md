@@ -34,8 +34,8 @@ npm install @shelbyb/daywalker-sdk
 # Generate Ed25519 keypair and write .env.local
 npx daywalker init --service my-service-slug
 
-# Or register the public key immediately with Daywalker Auth:
-npx daywalker init --service my-service-slug --api-key srv_live_...
+# Or register the public key immediately with Daywalker Auth (domain is required by the API):
+npx daywalker init --service my-service-slug --domain app.example.com --api-key srv_live_...
 
 # Pipe JSON secrets directly into Vercel, Fly.io, DigitalOcean, or AWS SSM:
 npx daywalker init --service my-service-slug --api-key srv_live_... --json
@@ -43,7 +43,7 @@ npx daywalker init --service my-service-slug --api-key srv_live_... --json
 
 `daywalker init`:
 - Generates an Ed25519 keypair locally using WebCrypto (`crypto.subtle`)
-- Registers the public JWK directly with `POST https://auth.daywalker.dev/api/v1/keys/register`
+- Registers the public JWK directly with `POST https://auth.daywalker.dev/api/v1/keys/register` (`Authorization: Bearer <API key>`, body `{ keyId, domain, publicKey }`; responds `201`)
 - Writes `DAYWALKER_SERVICE_SLUG`, `DAYWALKER_KEY_ID`, `DAYWALKER_SIGNING_KEY`, and `DAYWALKER_AUTH_URL` to `.env.local`
 - No route injectors or public `/.well-known/` endpoints needed
 
@@ -190,6 +190,19 @@ const result = await client.validateToken(incomingJwt);
 | `npx daywalker init --service <slug> [--api-key <key>] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
 | `npx daywalker check` | Validate configuration, signature readiness, and connection |
 | `npx daywalker rotate [--api-key <key>] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
+
+---
+
+## API Reference (per the [OpenAPI spec](https://auth.daywalker.dev/docs))
+
+| Endpoint | SDK usage | Notes |
+|---|---|---|
+| `POST /api/v1/tokens/validate` | `client.validateToken()` | Body `{ token, serviceSlug }`; signed with `Signature-Input`, `Signature`, `Content-Digest`. Errors: `400` (`DIGEST_MISMATCH`/missing fields), `401` (`INVALID_SIGNATURE`/invalid token), `403`, `429`. Response includes `valid`, `tokenId`, `tokenName`, `userId`, `stage`, `rateLimit`, `rateLimitHourly` and `X-RateLimit-*` / `X-RateLimit-Hourly-*` headers |
+| `POST /api/v1/keys/register` | `npx daywalker init` / `rotate` | Bearer auth; body `{ keyId, domain, publicKey }` |
+| `POST /api/v1/leases/issue` | `client.issueLease(ttlSeconds?)` | Signed request returns `{ lease, tokenType, expiresAt, jwksUri }` (EdDSA JWT) |
+| `GET /.well-known/jwks.json` | `client.fetchJwks()` | Daywalker public JWKS for offline lease verification |
+
+Inbound tokens may be supplied as `x-api-token: srv_live_...` or `Authorization: Bearer <JWT or API key>`.
 
 ---
 
