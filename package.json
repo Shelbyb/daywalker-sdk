@@ -1,7 +1,7 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.1.4",
-  "description": "Validate Daywalker API tokens and make domain-signed calls to Daywalker Auth from any service.",
+  "version": "0.2.0",
+  "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics) in one zero-dependency package.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,6 +21,34 @@
     "./express": {
       "types": "./dist/express.d.ts",
       "import": "./dist/express.js"
+    },
+    "./flags": {
+      "types": "./dist/flags/client.d.ts",
+      "import": "./dist/flags/client.js"
+    },
+    "./flags/node": {
+      "types": "./dist/flags/node.d.ts",
+      "import": "./dist/flags/node.js"
+    },
+    "./flags/react": {
+      "types": "./dist/flags/react.d.ts",
+      "import": "./dist/flags/react.js"
+    },
+    "./flags/engine": {
+      "types": "./dist/flags/engine/index.d.ts",
+      "import": "./dist/flags/engine/index.js"
+    },
+    "./openfeature/server": {
+      "types": "./dist/openfeature/server.d.ts",
+      "import": "./dist/openfeature/server.js"
+    },
+    "./openfeature/web": {
+      "types": "./dist/openfeature/web.d.ts",
+      "import": "./dist/openfeature/web.js"
+    },
+    "./analytics": {
+      "types": "./dist/analytics/index.d.ts",
+      "import": "./dist/analytics/index.js"
     }
   },
   "bin": {
@@ -29,6 +57,7 @@
   "files": [
     "dist",
     "assets",
+    "docs",
     "README.md",
     "LICENSE"
   ],
@@ -52,19 +81,45 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "@openfeature/core": "^1.12.0",
+    "@openfeature/server-sdk": "^1.23.0",
+    "@openfeature/web-sdk": "^1.10.0",
     "@types/node": "^22.13.5",
-    "typescript": "^5.9.3",
-    "tsx": "^4.23.15"
+    "@types/react": "^19.3.0",
+    "react": "^19.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
   },
   "keywords": [
-    "daywalker",
     "api-token",
     "authentication",
+    "daywalker",
+    "devpulse",
     "ed25519",
+    "feature-flags",
+    "openfeature",
+    "product-analytics",
     "request-signing"
   ],
   "homepage": "https://auth.daywalker.dev/docs",
   "bugs": {
     "url": "https://github.com/Shelbyb/daywalker-sdk/issues"
-  }
+  },
+  "peerDependencies": {
+    "@openfeature/server-sdk": "^1.17.0",
+    "@openfeature/web-sdk": "^1.5.0",
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "@openfeature/server-sdk": {
+      "optional": true
+    },
+    "@openfeature/web-sdk": {
+      "optional": true
+    }
+  },
+  "sideEffects": false
 }
