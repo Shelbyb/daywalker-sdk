@@ -1,7 +1,7 @@
 # Changelog
 
-## 0.2.1
-Security fixes. Items marked **breaking** change behavior existing code may rely on.
+## 0.3.0
+Security fixes. Released as a minor version (not 0.2.1) because several changes are breaking: `^0.2.x` ranges won't pick it up automatically. Items marked **breaking** change behavior existing code may rely on.
 
 - **Breaking:** `validateToken()` / `requireValidToken()` without a token now fail with `INVALID_TOKEN` (401) instead of validating the service's own `DAYWALKER_API_KEY`. Use the new `validateServiceKey()` for a service health check.
 - **Breaking:** `createDaywalkerMiddleware` (`./next`) authenticates each request's `Authorization: Bearer` / `x-api-token`; requests without one get 401 (API routes) or the `errorPath` redirect (pages, unless `protectApiOnly`). The old service-key gate is now `createDaywalkerServiceHealthMiddleware`.
