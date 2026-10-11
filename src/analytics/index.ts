@@ -1,3 +1,5 @@
+import { assertSecureUrl } from "../config.js";
+
 /**
  * DevPulse product analytics. Works in browsers (automatic page views,
  * sessions, persistence, sendBeacon on page hide) and in Node (pass a
@@ -12,7 +14,7 @@ export type FlagSource = { allFlags(): Record<string, unknown> };
 export type AnalyticsOptions = {
   /** The project's public write key (dpa_…). */
   writeKey: string;
-  /** Your DevPulse URL, e.g. https://devpulse.example.com */
+  /** Your DevPulse URL, e.g. https://devpulse.example.com (https required except on localhost). */
   host: string;
   /** Capture $pageview on load and on client-side navigation (browsers). Default true. */
   autocapturePageviews?: boolean;
@@ -32,6 +34,12 @@ export type AnalyticsOptions = {
   respectDoNotTrack?: boolean;
   /** Start opted out (e.g. until the user accepts a consent banner). */
   optedOut?: boolean;
+  /**
+   * Send $current_url / $referrer with their full query string and fragment. Default false:
+   * the fragment is dropped and only campaign parameters (utm_*, gclid, fbclid, ref) are kept,
+   * so OAuth codes, reset tokens and the like never leave the page.
+   */
+  captureFullUrls?: boolean;
   fetch?: typeof fetch;
   onError?: (err: Error) => void;
 };
@@ -48,6 +56,24 @@ type Event = { uuid: string; event: string; distinct_id: string; timestamp: stri
 type State = { distinctId: string; identified: boolean; props: Properties; session?: { id: string; last: number; start: number }; initialSent?: boolean; optedOut?: boolean };
 
 export const VERSION = "0.1.0";
+const KEPT_QUERY_PARAMS = new Set(["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "ref"]);
+
+/** Drop the fragment and every query parameter outside the campaign allowlist. */
+export function sanitizeUrl(raw: string): string {
+  if (!raw) return raw;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return raw.split(/[?#]/)[0]!;
+  }
+  url.hash = "";
+  for (const key of [...url.searchParams.keys()]) {
+    if (!KEPT_QUERY_PARAMS.has(key)) url.searchParams.delete(key);
+  }
+  return url.toString();
+}
+
 const isBrowser = typeof window !== "undefined" && typeof document !== "undefined";
 const MAX_SESSION_MS = 24 * 3_600_000;
 
@@ -108,6 +134,7 @@ export class Analytics {
   constructor(options: AnalyticsOptions) {
     if (!options.writeKey) throw new Error("writeKey is required");
     if (!options.host) throw new Error("host is required");
+    assertSecureUrl("host", options.host);
     this.opts = { flushAt: 20, flushInterval: isBrowser ? 2000 : 10000, maxQueueSize: 1000, sessionTimeoutMinutes: 30, ...options };
     this.endpoint = `${options.host.replace(/\/+$/, "")}/a/batch`;
     this.store = new Store(`dp_analytics_${options.writeKey}`, (options.persistence ?? (isBrowser ? "localStorage" : "memory")) === "localStorage" && isBrowser);
@@ -134,13 +161,13 @@ export class Analytics {
   /** Record a page view (automatic unless autocapturePageviews is false). */
   pageview(properties: Properties = {}) {
     if (!isBrowser) return this.capture("$pageview", properties);
-    const url = location.href;
-    this.lastUrl = url;
+    this.lastUrl = location.href;
+    const url = this.url(location.href);
     const utm = Object.fromEntries([...new URLSearchParams(location.search)].filter(([k]) => /^utm_(source|medium|campaign|term|content)$/.test(k)));
     let setOnce: Properties | undefined;
     if (!this.state.initialSent) {
       setOnce = {
-        $initial_referrer: document.referrer || "$direct",
+        $initial_referrer: document.referrer ? this.url(document.referrer) : "$direct",
         $initial_referring_domain: referringDomain(document.referrer) ?? "$direct",
         $initial_current_url: url,
         $initial_pathname: location.pathname,
@@ -251,10 +278,10 @@ export class Analytics {
     if (!isBrowser) return base;
     return {
       ...base,
-      $current_url: location.href,
+      $current_url: this.url(location.href),
       $host: location.host,
       $pathname: location.pathname,
-      $referrer: document.referrer || "$direct",
+      $referrer: document.referrer ? this.url(document.referrer) : "$direct",
       $referring_domain: referringDomain(document.referrer) ?? "$direct",
       $screen_width: screen.width,
       $screen_height: screen.height,
@@ -263,6 +290,10 @@ export class Analytics {
       $browser_language: navigator.language,
       $device_id: this.state.identified ? undefined : this.state.distinctId,
     };
+  }
+
+  private url(raw: string): string {
+    return this.opts.captureFullUrls ? raw : sanitizeUrl(raw);
   }
 
   private flagProps(): Properties {

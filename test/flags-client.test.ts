@@ -21,9 +21,9 @@ const tick = () => new Promise((r) => setTimeout(r, 10));
 describe("DevPulseClient", () => {
   it("loads via stream put, applies patches and emits changes", async () => {
     const s = streamingFetch();
-    const client = createClient("cid", { key: "u1" }, { baseUrl: "http://x/", fetch: s.f, sendEvents: false });
+    const client = createClient("cid", { key: "u1" }, { baseUrl: "https://x/", fetch: s.f, sendEvents: false });
     await tick();
-    expect(s.requests[0]).toMatch(/^http:\/\/x\/sdk\/v1\/client\/cid\/stream\?context=/);
+    expect(s.requests[0]).toMatch(/^https:\/\/x\/sdk\/v1\/client\/cid\/stream\?context=/);
     s.push('event: put\ndata: {"a":{"value":false,"variation":1,"version":1}}\n\n');
     await client.waitForInitialization({ timeoutMs: 1000 });
     expect(client.variation("a", true)).toBe(false);
@@ -45,7 +45,7 @@ describe("DevPulseClient", () => {
   });
 
   it("serves bootstrap values immediately and guards types", async () => {
-    const client = createClient("cid", { key: "u1" }, { baseUrl: "http://x", streaming: false, sendEvents: false, bootstrap: { n: 5 }, fetch: (async () => Response.json({ n: { value: 5, variation: 0, version: 1 } })) as unknown as typeof fetch });
+    const client = createClient("cid", { key: "u1" }, { baseUrl: "https://x", streaming: false, sendEvents: false, bootstrap: { n: 5 }, fetch: (async () => Response.json({ n: { value: 5, variation: 0, version: 1 } })) as unknown as typeof fetch });
     expect(client.isInitialized).toBe(true);
     expect(client.variation("n", 0)).toBe(5);
     expect(client.variationDetail("n", "x").reason).toEqual({ kind: "ERROR", errorKind: "WRONG_TYPE" });

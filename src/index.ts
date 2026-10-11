@@ -25,6 +25,7 @@ export type {
 export {
   resolveConfig,
   publicHostname,
+  assertSecureUrl,
 } from "./config.js";
 
 export type {
