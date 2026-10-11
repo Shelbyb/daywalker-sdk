@@ -1,13 +1,20 @@
 name: Publish
 
-# Publishes @shelbyb/daywalker-sdk to npm when a tag like v0.1.1 is pushed.
-# The tag must match package.json's version.
+# Publishes @shelbyb/daywalker-sdk to npm when a tag like v0.1.1 is pushed,
+# or when run manually from main with the version to release. Either way the
+# version must match package.json, so a run can only publish what's committed.
 #
 # Auth: npm trusted publishing (OIDC) for this repo and workflow, so no npm token is stored.
 # Each release gets a signed provenance attestation linking it to this commit.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (must equal package.json, e.g. 0.2.0)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,10 +31,22 @@ jobs:
           node-version-file: .nvmrc
           registry-url: https://registry.npmjs.org
 
-      - name: Check tag matches package version
+      - name: Check the release matches package version
+        env:
+          # Passed through env, never interpolated into the script (no injection).
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           version=$(node -p "require('./package.json').version")
-          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::Manual publishes must run from main (got $GITHUB_REF)"
+              exit 1
+            fi
+            if [ "$INPUT_VERSION" != "$version" ]; then
+              echo "::error::Requested version $INPUT_VERSION does not match package version $version"
+              exit 1
+            fi
+          elif [ "v$version" != "${GITHUB_REF_NAME}" ]; then
             echo "::error::Tag ${GITHUB_REF_NAME} does not match package version $version"
             exit 1
           fi
