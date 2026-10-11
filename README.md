@@ -62,7 +62,8 @@ The private key is never printed unless you pass `--print-key`.
 | `DAYWALKER_SIGNING_KEY_PREVIOUS` | during rotation | Previous private key, maintained during deployment transitions |
 | `DAYWALKER_DOMAIN` | optional | Optional caller identifier or host domain name |
 | `DAYWALKER_PUBLIC_KEY` | optional | Daywalker Auth public key for zero-egress offline JWT lease verification |
-| `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev` |
+| `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev`; must be `https://` (except localhost) |
+| `DAYWALKER_LEASE_ISSUER` | optional | Expected `iss` of offline-verified JWT leases |
 
 ---
 
@@ -81,7 +82,8 @@ const client = new Daywalker({
 });
 
 // Option 2: Default lazy singleton (reads process.env automatically)
-const result = await daywalker.validateToken();
+const result = await daywalker.validateToken(incomingToken);
+// Service health check of this service's own DAYWALKER_API_KEY: daywalker.validateServiceKey()
 
 if (result.ok) {
   console.log("Validated tenant:", result.data.tenantId);
@@ -135,6 +137,8 @@ export const config = {
 };
 ```
 
+Each request must carry `Authorization: Bearer <token>` or `x-api-token`; without one, API routes get `401` and pages redirect to `errorPath`. Only `/_next/static/`, `/_next/image`, the favicon and static file extensions outside `/api/` skip auth. To gate the app on this service's own API key instead (the self-healing error page), use `createDaywalkerServiceHealthMiddleware` with the same options.
+
 ### Route Handler Wrapper
 
 ```ts
@@ -180,6 +184,8 @@ const client = new Daywalker({
 // Verifies JWT signature, expiration, and service claims locally
 const result = await client.validateToken(incomingJwt);
 ```
+
+Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) equal to your service slug, so `serviceSlug` must be configured. Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
 
 ---
 

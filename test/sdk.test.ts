@@ -224,7 +224,7 @@ describe("Zero-egress offline JWT lease verification", () => {
     const expiredJwt = createTestJwt({
       sub: "tok_12345",
       serviceSlug: "myservice",
-      exp: now - 10,
+      exp: now - 120, // beyond the 60s clock skew allowance
     });
 
     const res1 = await verifyJwtLease({ token: expiredJwt, publicKey: pubJwk, currentTime: now });
@@ -282,7 +282,7 @@ describe("Daywalker Client class & lazy proxy", () => {
       },
     });
 
-    const result = await client.validateToken();
+    const result = await client.validateServiceKey();
     assert.strictEqual(result.ok, true);
     if (result.ok) {
       assert.strictEqual(result.data.serviceSlug, "sonalyze");
@@ -294,7 +294,7 @@ describe("Daywalker Client class & lazy proxy", () => {
     assert.ok(capturedHeaders!.has("signature"));
     assert.strictEqual(capturedHeaders!.get("authorization"), "Bearer srv_live_test");
 
-    const payload = await client.requireValidToken();
+    const payload = await client.requireValidToken("tok_caller");
     assert.strictEqual(payload.tenantId, "ten_123");
   });
 
@@ -334,7 +334,7 @@ describe("Daywalker Client class & lazy proxy", () => {
       },
     });
 
-    const result = await client.validateToken();
+    const result = await client.validateServiceKey();
     assert.strictEqual(result.ok, false);
     if (!result.ok) {
       assert.strictEqual(result.error, "EXPIRED");
@@ -342,7 +342,7 @@ describe("Daywalker Client class & lazy proxy", () => {
       assert.strictEqual(result.message, "Token expired");
     }
 
-    await assert.rejects(client.requireValidToken(), (err: unknown) => {
+    await assert.rejects(client.requireValidToken("tok_caller"), (err: unknown) => {
       assert.ok(err instanceof DaywalkerAuthError);
       assert.strictEqual((err as DaywalkerAuthError).code, "EXPIRED");
       assert.strictEqual((err as DaywalkerAuthError).status, 401);
@@ -399,7 +399,7 @@ describe("Framework Middleware Adapters", () => {
     assert.strictEqual(healthRes.headers.get("x-middleware-next"), "1");
 
     // 2. Protects normal pages when token valid
-    const normalReq = new Request("https://localhost/dashboard");
+    const normalReq = new Request("https://localhost/dashboard", { headers: { authorization: "Bearer tok_caller" } });
     const normalRes = await mw(normalReq);
     assert.strictEqual(normalRes.headers.get("x-middleware-next"), "1");
 
@@ -411,13 +411,13 @@ describe("Framework Middleware Adapters", () => {
     });
     const invalidMw = createDaywalkerMiddleware({ client: invalidClient });
 
-    const apiReq = new Request("https://localhost/api/data");
+    const apiReq = new Request("https://localhost/api/data", { headers: { authorization: "Bearer tok_revoked" } });
     const apiRes = await invalidMw(apiReq);
     assert.strictEqual(apiRes.status, 401);
     assert.strictEqual(apiRes.headers.get("access-control-allow-origin"), "*");
 
     // 4. Handles invalid token on UI page (redirects to /service-error)
-    const uiReq = new Request("https://localhost/dashboard?tab=security");
+    const uiReq = new Request("https://localhost/dashboard?tab=security", { headers: { "x-api-token": "tok_revoked" } });
     const uiRes = await invalidMw(uiReq);
     assert.strictEqual(uiRes.status, 307);
     const loc = uiRes.headers.get("location") || "";

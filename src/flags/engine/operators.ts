@@ -3,13 +3,54 @@ import type { FlagValue, Operator } from "./types.js";
 
 const regexCache = new Map<string, RegExp | null>();
 
+/** `matches` limits: longer inputs or patterns never match. */
+export const MAX_MATCH_INPUT_LENGTH = 1024;
+export const MAX_MATCH_PATTERN_LENGTH = 500;
+
+let warnedUnsafePattern = false;
+
+/**
+ * Conservative ReDoS heuristic: a group that contains a quantifier or alternation and is itself
+ * repeated (`(a+)+`, `(a*)*`, `(a|aa)+`, `(?:x+y)*`, `(a+){2,}`). Character classes and escapes are skipped.
+ */
+export function hasNestedQuantifier(pattern: string): boolean {
+  const stack: boolean[] = []; // per open group: contains a quantifier / alternation
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") {
+      i++;
+    } else if (ch === "[") {
+      for (i++; i < pattern.length && pattern[i] !== "]"; i++) if (pattern[i] === "\\") i++;
+    } else if (ch === "(") {
+      stack.push(false);
+      if (pattern[i + 1] === "?") i++; // group modifier, not a quantifier
+    } else if (ch === ")") {
+      const risky = stack.pop() ?? false;
+      const next = pattern[i + 1];
+      const repeated = next === "*" || next === "+" || next === "{";
+      if (risky && repeated) return true;
+      if ((risky || repeated) && stack.length) stack[stack.length - 1] = true;
+    } else if ((ch === "*" || ch === "+" || ch === "?" || ch === "{" || ch === "|") && stack.length) {
+      stack[stack.length - 1] = true;
+    }
+  }
+  return false;
+}
+
 function regex(pattern: string): RegExp | null {
   if (!regexCache.has(pattern)) {
     let re: RegExp | null = null;
-    try {
-      re = new RegExp(pattern);
-    } catch {
-      re = null;
+    if (pattern.length > MAX_MATCH_PATTERN_LENGTH || hasNestedQuantifier(pattern)) {
+      if (!warnedUnsafePattern) {
+        warnedUnsafePattern = true;
+        console.warn("DevPulse: a `matches` pattern was too long or had nested quantifiers and is treated as no match");
+      }
+    } else {
+      try {
+        re = new RegExp(pattern);
+      } catch {
+        re = null;
+      }
     }
     if (regexCache.size > 1000) regexCache.clear();
     regexCache.set(pattern, re);
@@ -48,6 +89,7 @@ export function applyOperator(op: Exclude<Operator, "segmentMatch">, actual: unk
       return typeof actual === "string" && typeof expected === "string" && actual.includes(expected);
     case "matches": {
       if (typeof actual !== "string" || typeof expected !== "string") return false;
+      if (actual.length > MAX_MATCH_INPUT_LENGTH) return false;
       return regex(expected)?.test(actual) ?? false;
     }
     case "lessThan":

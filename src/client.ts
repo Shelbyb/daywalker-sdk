@@ -6,6 +6,7 @@ import {
   verifyJwtLease,
   maskSecret,
   redactSecrets,
+  sha256Base64Url,
 } from "./crypto/index.js";
 import {
   DaywalkerAuthError,
@@ -42,6 +43,9 @@ function generateNonce(): string {
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+
+/** Validation results kept in memory; the least recently used are evicted past this. */
+export const MAX_VALIDATION_CACHE_ENTRIES = 1000;
 
 export type DaywalkerFetchInit = Omit<RequestInit, "body"> & {
   body?: BodyInit | object | null;
@@ -101,6 +105,11 @@ export class Daywalker {
   ): Promise<Response> {
     const authUrl = this._config.authUrl;
     const url = new URL(path, authUrl);
+    // Absolute URLs to other hosts would otherwise receive the API key and a valid signature.
+    const authOrigin = new URL(authUrl).origin;
+    if (url.origin !== authOrigin) {
+      throw new DaywalkerError(`Refusing to send Daywalker credentials to ${url.origin}; fetch() only targets ${authOrigin}`);
+    }
     const method = (init?.method ?? (init?.body !== undefined ? "POST" : "GET")).toUpperCase();
     const doFetch = this._rawConfig.fetch ?? globalThis.fetch;
 
@@ -202,9 +211,30 @@ export class Daywalker {
     }
   }
 
+  private _cacheGet(key: string): ValidateResult | undefined {
+    const entry = this._cache.get(key);
+    if (!entry) return undefined;
+    this._cache.delete(key);
+    if (entry.expiresAt <= Date.now()) return undefined;
+    this._cache.set(key, entry); // most recently used goes last
+    return entry.result;
+  }
+
+  private _cacheSet(key: string, result: ValidateResult, ttlMs: number, notAfterMs = Infinity): void {
+    const expiresAt = Math.min(Date.now() + ttlMs, notAfterMs);
+    if (expiresAt <= Date.now()) return;
+    this._cache.delete(key);
+    this._cache.set(key, { result, expiresAt });
+    while (this._cache.size > MAX_VALIDATION_CACHE_ENTRIES) {
+      this._cache.delete(this._cache.keys().next().value as string);
+    }
+  }
+
   /**
-   * Validates incoming bearer tokens with memory caching and discriminated union return.
+   * Validates an incoming bearer token with memory caching and discriminated union return.
    * Supports zero-egress offline verification for JWT token leases when Daywalker's public key is configured.
+   * A missing token is always rejected (401); it never falls back to this service's own API key —
+   * use `validateServiceKey()` for that.
    */
   public async validateToken(
     tokenOrOptions?: string | { token?: string; serviceSlug?: string; forceRefresh?: boolean; offlineOnly?: boolean },
@@ -221,7 +251,7 @@ export class Daywalker {
       forceRefresh = options?.forceRefresh ?? false;
       offlineOnly = options?.offlineOnly ?? false;
     } else {
-      token = tokenOrOptions?.token ?? this._config.apiKey ?? undefined;
+      token = tokenOrOptions?.token ?? undefined;
       serviceSlug = (tokenOrOptions?.serviceSlug ?? this._config.serviceSlug ?? "").toLowerCase();
       forceRefresh = tokenOrOptions?.forceRefresh ?? false;
       offlineOnly = tokenOrOptions?.offlineOnly ?? false;
@@ -230,16 +260,17 @@ export class Daywalker {
     if (!token) {
       return {
         ok: false,
-        error: "CONFIGURATION_ERROR",
-        status: 400,
+        error: "INVALID_TOKEN",
+        status: 401,
         message: "Missing token to validate",
       };
     }
 
-    const cacheKey = `${serviceSlug || "default"}:${token}`;
-    const cached = this._cache.get(cacheKey);
-    if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
-      return cached.result;
+    // Keyed by a hash so raw tokens are never held as cache keys.
+    const cacheKey = `${serviceSlug || "default"}:${await sha256Base64Url(token)}`;
+    const cached = forceRefresh ? undefined : this._cacheGet(cacheKey);
+    if (cached) {
+      return cached;
     }
 
     // Check for offline JWT lease verification
@@ -248,6 +279,7 @@ export class Daywalker {
         token,
         publicKey: this._config.daywalkerPublicKey,
         expectedServiceSlug: serviceSlug || undefined,
+        expectedIssuer: this._config.leaseIssuer ?? undefined,
       });
 
       if (jwtResult.valid && jwtResult.payload) {
@@ -273,7 +305,8 @@ export class Daywalker {
         };
 
         if (this._config.cacheTtlMs > 0) {
-          this._cache.set(cacheKey, { result, expiresAt: Date.now() + this._config.cacheTtlMs });
+          // Never cache a lease past its own expiry.
+          this._cacheSet(cacheKey, result, this._config.cacheTtlMs, (payload.exp as number) * 1000);
         }
         return result;
       } else if (offlineOnly) {
@@ -308,7 +341,7 @@ export class Daywalker {
     const negTtl = this._config.negativeCacheTtlMs;
     const fail = (result: Extract<ValidateResult, { ok: false }>): ValidateResult => {
       if (negTtl > 0 && result.error !== "RATE_LIMITED" && result.error !== "NETWORK_ERROR") {
-        this._cache.set(cacheKey, { result, expiresAt: Date.now() + negTtl });
+        this._cacheSet(cacheKey, result, negTtl);
       }
       return result;
     };
@@ -345,7 +378,7 @@ export class Daywalker {
         };
 
         if (this._config.cacheTtlMs > 0) {
-          this._cache.set(cacheKey, { result, expiresAt: Date.now() + this._config.cacheTtlMs });
+          this._cacheSet(cacheKey, result, this._config.cacheTtlMs);
         }
         return result;
       }
@@ -383,6 +416,22 @@ export class Daywalker {
         message: redactSecrets(`Could not reach Daywalker Auth: ${(err as Error).message}`),
       };
     }
+  }
+
+  /**
+   * Service health check: validates this service's own configured API key (DAYWALKER_API_KEY).
+   * Never use this to authenticate an incoming request.
+   */
+  public async validateServiceKey(options?: { serviceSlug?: string; forceRefresh?: boolean }): Promise<ValidateResult> {
+    if (!this._config.apiKey) {
+      return {
+        ok: false,
+        error: "CONFIGURATION_ERROR",
+        status: 500,
+        message: "DAYWALKER_API_KEY is not set",
+      };
+    }
+    return this.validateToken(this._config.apiKey, options);
   }
 
   /**

@@ -73,6 +73,9 @@ export interface DaywalkerConfig {
   serviceSlug?: string;
   domain?: string;
   daywalkerPublicKey?: string | PublicJwk;
+  /** Expected `iss` of offline-verified JWT leases (env DAYWALKER_LEASE_ISSUER). Unchecked when unset. */
+  leaseIssuer?: string;
+  /** Must be https:// (http:// only for localhost). */
   authUrl?: string;
   cacheTtlMs?: number;
   /** Short cache for failed validations (not 429/network errors). Default 3000ms; 0 disables. */

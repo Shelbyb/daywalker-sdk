@@ -1,5 +1,6 @@
 import type { ContextInput, EvaluationReason, FlagValue } from "./engine/index.js";
 import { EventProcessor, SseClient, encodeContext, noopLogger, type Logger } from "./common/index.js";
+import { assertSecureUrl } from "../config.js";
 
 export type { ContextInput, EvaluationReason, FlagValue, Logger };
 
@@ -15,7 +16,7 @@ export interface FlagState {
 export type FlagSet = Record<string, FlagState>;
 
 export interface ClientOptions {
-  /** Base URL of your DevPulse deployment, e.g. https://flags.example.com */
+  /** Base URL of your DevPulse deployment, e.g. https://flags.example.com (https required except on localhost). */
   baseUrl: string;
   /** Receive changes in real time over Server-Sent Events (default true). */
   streaming?: boolean;
@@ -44,6 +45,11 @@ export interface EvaluationDetail<T = FlagValue> {
 type ChangeSet = Record<string, { current: FlagValue; previous: FlagValue | undefined }>;
 type Listener = (...args: unknown[]) => void;
 
+/** A flag map without a prototype, so keys like `__proto__` or `toString` never resolve to inherited values. */
+function flagMap(entries: Record<string, FlagState> = {}): FlagSet {
+  return Object.assign(Object.create(null) as FlagSet, entries);
+}
+
 function isFlagSet(x: unknown): x is FlagSet {
   return !!x && typeof x === "object" && Object.values(x).every((v) => v && typeof v === "object" && "value" in (v as object) && "version" in (v as object));
 }
@@ -58,7 +64,7 @@ function isFlagSet(x: unknown): x is FlagSet {
  *   client.variation("new-checkout", false);
  */
 export class DevPulseClient {
-  private flags: FlagSet = {};
+  private flags: FlagSet = flagMap();
   private listeners = new Map<string, Set<Listener>>();
   private stream: SseClient | null = null;
   private events: EventProcessor | null = null;
@@ -76,6 +82,7 @@ export class DevPulseClient {
     private readonly options: ClientOptions,
   ) {
     this.logger = options.logger ?? noopLogger;
+    assertSecureUrl("baseUrl", options.baseUrl);
     this.base = options.baseUrl.replace(/\/$/, "");
     this.ready = new Promise((res, rej) => {
       this.resolveReady = res;
@@ -85,12 +92,12 @@ export class DevPulseClient {
 
     if (options.bootstrap) {
       this.flags = isFlagSet(options.bootstrap)
-        ? { ...options.bootstrap }
-        : Object.fromEntries(Object.entries(options.bootstrap).map(([k, v]) => [k, { value: v as FlagValue, variation: null, version: 0 }]));
+        ? flagMap(options.bootstrap)
+        : flagMap(Object.fromEntries(Object.entries(options.bootstrap).map(([k, v]) => [k, { value: v as FlagValue, variation: null, version: 0 }])));
       this.markReady();
     } else if (options.cache) {
       const cached = this.readCache();
-      if (cached) this.flags = cached;
+      if (cached) this.flags = flagMap(cached);
     }
 
     if (options.sendEvents !== false && typeof globalThis.fetch === "function") {
@@ -160,14 +167,14 @@ export class DevPulseClient {
       if (type === "put") this.replaceAll(payload as FlagSet);
       else if (type === "patch") {
         const { key, ...state } = payload as FlagState & { key: string };
-        const prev = this.flags[key];
+        const prev = this.flag(key);
         if (prev && prev.version > state.version) return;
         this.flags[key] = state;
         this.emitChanges({ [key]: { current: state.value, previous: prev?.value } });
         this.writeCache();
       } else if (type === "delete") {
         const { key, version } = payload as { key: string; version: number };
-        const prev = this.flags[key];
+        const prev = this.flag(key);
         if (!prev || prev.version > version) return;
         delete this.flags[key];
         this.emitChanges({ [key]: { current: null, previous: prev.value } });
@@ -181,14 +188,18 @@ export class DevPulseClient {
   private replaceAll(next: FlagSet) {
     const changes: ChangeSet = {};
     for (const key of new Set([...Object.keys(this.flags), ...Object.keys(next)])) {
-      const a = this.flags[key]?.value;
-      const b = next[key]?.value;
+      const a = this.flag(key)?.value;
+      const b = Object.hasOwn(next, key) ? next[key]?.value : undefined;
       if (JSON.stringify(a) !== JSON.stringify(b)) changes[key] = { current: b ?? null, previous: a };
     }
-    this.flags = { ...next };
+    this.flags = flagMap(next);
     this.writeCache();
     this.markReady();
     if (Object.keys(changes).length) this.emitChanges(changes);
+  }
+
+  private flag(key: string): FlagState | undefined {
+    return Object.hasOwn(this.flags, key) ? this.flags[key] : undefined;
   }
 
   private markReady() {
@@ -249,7 +260,7 @@ export class DevPulseClient {
   }
 
   variationDetail<T extends FlagValue>(key: string, defaultValue: T): EvaluationDetail<T> {
-    const f = this.flags[key];
+    const f = this.flag(key);
     let detail: EvaluationDetail<T>;
     if (!f) detail = { value: defaultValue, variationIndex: null, reason: { kind: "ERROR", errorKind: this.initialized ? "FLAG_NOT_FOUND" : "CLIENT_NOT_READY" } };
     // A null value means "off with no off variation": serve the caller's default.
