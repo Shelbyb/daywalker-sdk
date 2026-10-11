@@ -24,6 +24,22 @@ export interface Logger {
 
 export const noopLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
+/** Delete the value at `tokens` inside `target`, copying (not mutating) nested objects. */
+function removePointer(target: Record<string, unknown>, tokens: string[]): boolean {
+  const [head, ...rest] = tokens as [string, ...string[]];
+  if (!Object.hasOwn(target, head)) return false;
+  if (!rest.length) {
+    delete target[head];
+    return true;
+  }
+  const child = target[head];
+  if (!child || typeof child !== "object" || Array.isArray(child)) return false;
+  const copy = { ...(child as Record<string, unknown>) };
+  if (!removePointer(copy, rest)) return false;
+  target[head] = copy;
+  return true;
+}
+
 type Counter = { variation?: number; version?: number; value: FlagValue; count: number; unknown?: boolean };
 
 /**
@@ -57,6 +73,12 @@ export class EventProcessor {
         if (k === "_meta") continue;
         if (k !== "key" && k !== "kind" && k !== "anonymous" && (this.opts.allAttributesPrivate || priv.has(k) || priv.has(`/${k}`))) redacted.push(k);
         else out[k] = v;
+      }
+      // Nested JSON pointers (/address/zip): remove the leaf from a copy of each object on the path.
+      for (const ref of priv) {
+        const tokens = ref.startsWith("/") ? ref.slice(1).split("/").map((t) => t.replace(/~1/g, "/").replace(/~0/g, "~")) : [];
+        if (tokens.length < 2 || ["key", "kind", "anonymous", "_meta"].includes(tokens[0]!)) continue;
+        if (removePointer(out, tokens)) redacted.push(ref);
       }
       if (redacted.length) out.redactedAttributes = redacted;
       return out;

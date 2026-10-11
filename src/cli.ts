@@ -73,6 +73,8 @@ function writeEnvFile(file: string, values: Record<string, string | null>) {
     out.push("# Daywalker Auth (managed by `daywalker init`)", ...added.map(([k, v]) => `${k}="${v}"`));
   }
   fs.writeFileSync(file, out.join("\n") + "\n", { mode: 0o600 });
+  // `mode` only applies when the file is created; tighten an existing file too.
+  fs.chmodSync(file, 0o600);
 }
 
 function ensureGitignored(dir: string, entry: string) {
@@ -235,6 +237,10 @@ async function check() {
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const parsedArgs = args(rest);
+
+  if (typeof parsedArgs["api-key"] === "string") {
+    console.warn("! --api-key exposes the key in shell history and process listings; prefer DAYWALKER_API_KEY in the environment or .env.local.");
+  }
 
   if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
     console.log(HELP);

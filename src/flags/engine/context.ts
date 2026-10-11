@@ -34,7 +34,8 @@ function parseSingle(kind: string, raw: unknown): SingleContext {
   if (typeof obj.key !== "string" || obj.key === "") throw new ContextError(`Context "${kind}" needs a non-empty string key`);
   const meta = (obj._meta ?? {}) as { privateAttributes?: unknown };
   const privateAttributes = Array.isArray(meta.privateAttributes) ? meta.privateAttributes.filter((a): a is string => typeof a === "string") : [];
-  const attributes: Record<string, unknown> = {};
+  // No prototype: `constructor`, `toString`, `__proto__` resolve only if the context sets them.
+  const attributes: Record<string, unknown> = Object.create(null);
   for (const [k, v] of Object.entries(obj)) if (k !== "_meta" && k !== "kind") attributes[k] = v;
   return { kind, key: obj.key, anonymous: obj.anonymous === true, attributes, privateAttributes };
 }
@@ -70,7 +71,7 @@ export function parseContext(input: unknown): Context {
 export function getAttribute(ctx: SingleContext, ref: string): unknown {
   if (ref === "kind") return ctx.kind;
   if (ref === "key") return ctx.key;
-  if (!ref.startsWith("/")) return ctx.attributes[ref];
+  if (!ref.startsWith("/")) return Object.hasOwn(ctx.attributes, ref) ? ctx.attributes[ref] : undefined;
   const tokens = ref
     .slice(1)
     .split("/")
@@ -83,7 +84,7 @@ export function getAttribute(ctx: SingleContext, ref: string): unknown {
       if (!/^(0|[1-9]\d*)$/.test(t)) return undefined;
       cur = cur[Number(t)];
     } else {
-      cur = (cur as Record<string, unknown>)[t];
+      cur = Object.hasOwn(cur, t) ? (cur as Record<string, unknown>)[t] : undefined;
     }
   }
   return cur;
