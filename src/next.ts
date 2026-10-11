@@ -16,6 +16,21 @@ export const DEFAULT_BYPASS_PATHS = [
   "/sitemap.xml",
 ];
 
+/** File extensions treated as static assets (outside /api/) and passed through without auth. */
+export const STATIC_FILE_EXTENSIONS = /\.(?:js|css|png|jpe?g|gif|webp|avif|svg|ico|woff2?|map|txt)$/i;
+
+/**
+ * Static assets that skip auth: Next's build output and image optimizer, the favicon, and files with
+ * an allowlisted extension. `/_next/data/` (getServerSideProps JSON) and `/api/*` are never static.
+ */
+export function isStaticAssetPath(pathname: string): boolean {
+  if (pathname === "/api" || pathname.startsWith("/api/")) return false;
+  if (pathname.startsWith("/_next/static/") || pathname === "/_next/image" || pathname.startsWith("/_next/image/")) return true;
+  if (pathname === "/favicon.ico") return true;
+  if (pathname.startsWith("/_next/")) return false;
+  return STATIC_FILE_EXTENSIONS.test(pathname);
+}
+
 export interface NextMiddlewareOptions {
   client?: Daywalker;
   serviceSlug?: string;
@@ -58,8 +73,8 @@ function extractToken(req: Request): string | null {
  * Implements:
  * 1. Server Action probe defense (CVE-2025-55182 scanner mitigation)
  * 2. Static asset and health check bypass
- * 3. Self-healing service error page routing with `from` back-redirect
- * 4. Distinct handling for API routes (JSON + CORS) vs UI pages (redirect)
+ * 3. Per-request token auth: requests without `Authorization: Bearer` / `x-api-token` get 401
+ * 4. Distinct handling for API routes (JSON + CORS) vs UI pages (redirect to `errorPath` with `from`)
  *
  * Example:
  *   // middleware.ts
@@ -73,6 +88,26 @@ function extractToken(req: Request): string | null {
  */
 export function createDaywalkerMiddleware(options: NextMiddlewareOptions = {}) {
   const client = options.client ?? daywalker;
+  return buildMiddleware(options, async (request) => {
+    const token = extractToken(request);
+    if (!token) {
+      return { ok: false, error: "INVALID_TOKEN", status: 401, message: "Missing Authorization header or x-api-token" };
+    }
+    return client.validateToken(token, { serviceSlug: options.serviceSlug });
+  });
+}
+
+/**
+ * Service health gate: checks this service's own DAYWALKER_API_KEY (not the caller's token) and
+ * routes every request to `errorPath` while it is invalid, redirecting back once it heals.
+ * It does NOT authenticate callers; use `createDaywalkerMiddleware` or `withDaywalkerAuth` for that.
+ */
+export function createDaywalkerServiceHealthMiddleware(options: NextMiddlewareOptions = {}) {
+  const client = options.client ?? daywalker;
+  return buildMiddleware(options, () => client.validateServiceKey({ serviceSlug: options.serviceSlug }));
+}
+
+function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request: Request) => Promise<ValidateResult>) {
   const bypassPaths = options.bypassPaths ?? DEFAULT_BYPASS_PATHS;
   const errorPath = options.errorPath ?? "/service-error";
   const homePath = options.homePath ?? "/";
@@ -106,26 +141,19 @@ export function createDaywalkerMiddleware(options: NextMiddlewareOptions = {}) {
     }
 
     // 1. Bypass static files and health check probes
-    if (
-      bypassPaths.some((path) => pathname === path || pathname.startsWith(`${path}/`)) ||
-      pathname.startsWith("/_next") ||
-      (pathname.includes(".") && !pathname.endsWith(".json"))
-    ) {
+    if (bypassPaths.some((path) => pathname === path || pathname.startsWith(`${path}/`)) || isStaticAssetPath(pathname)) {
       return (globalThis as any).NextResponse?.next
         ? (globalThis as any).NextResponse.next()
         : new Response(null, { headers: { "x-middleware-next": "1" } });
     }
 
-    // 2. Validate token (from request header, or service's configured DAYWALKER_API_KEY)
-    const incomingToken = extractToken(request);
-    const authResult: ValidateResult = await client.validateToken(
-      incomingToken ? { token: incomingToken, serviceSlug: options.serviceSlug } : { serviceSlug: options.serviceSlug }
-    );
+    // 2. Authenticate (caller's token, or the service key for the health gate)
+    const authResult: ValidateResult = await authenticate(request);
 
     // 3. Handle service error page route
     if (pathname === errorPath) {
       if (authResult.ok) {
-        // If the service token is now valid, heal/redirect back to home or referer
+        // Authorized again: heal/redirect back to home
         const redirectUrl = new URL(homePath, request.url);
         return (globalThis as any).NextResponse?.redirect
           ? (globalThis as any).NextResponse.redirect(redirectUrl)

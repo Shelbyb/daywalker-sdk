@@ -3,13 +3,14 @@ import {
   base64ToBytes,
   base64UrlToBytes,
   bytesToBase64,
-  bytesToBase64Url,
+  bytesToHex,
   stringToUtf8,
   utf8ToString,
   timingSafeEqualString,
 } from "./encoding.js";
 import { computeContentDigest } from "./digest.js";
 import { loadPublicKey, loadSigningKey } from "./keys.js";
+import { assertSecureUrl } from "../config.js";
 
 export const SIGNATURE_VERSION = "rfc9421";
 export const SIGNATURE_LABEL = "sig1";
@@ -41,30 +42,42 @@ export function assertSafeIdentifier(name: string, value: string): void {
   }
 }
 
-/**
- * In-memory LRU / sliding cache for nonces / signature replay protection.
- */
-class SignatureReplayCache {
-  private seen = new Map<string, number>();
-  private readonly ttlMs: number;
+/** Upper bound on remembered signatures; the oldest entries are evicted past this. */
+export const REPLAY_CACHE_MAX_ENTRIES = 10_000;
 
-  constructor(ttlSeconds = 360) {
-    this.ttlMs = ttlSeconds * 1000;
+/**
+ * In-memory replay cache, keyed on keyid + decoded signature bytes (so re-encodings of the
+ * same signature collide). Insertion-ordered, so eviction drops the oldest entries first.
+ */
+export class SignatureReplayCache {
+  private seen = new Map<string, number>();
+
+  constructor(private readonly maxEntries = REPLAY_CACHE_MAX_ENTRIES) {}
+
+  public get size(): number {
+    return this.seen.size;
   }
 
-  public checkAndRecord(signatureId: string): boolean {
-    const now = Date.now();
-    if (this.seen.size > 5000) {
-      for (const [k, exp] of this.seen.entries()) {
-        if (exp <= now) this.seen.delete(k);
-      }
+  /** True when the key was recorded and has not expired yet (a replay). */
+  public has(key: string, now = Date.now()): boolean {
+    const expiresAt = this.seen.get(key);
+    return expiresAt !== undefined && expiresAt > now;
+  }
+
+  public record(key: string, ttlMs: number, now = Date.now()): void {
+    this.seen.delete(key);
+    this.seen.set(key, now + ttlMs);
+    if (this.seen.size <= this.maxEntries) return;
+    for (const [k, exp] of this.seen) {
+      if (exp <= now) this.seen.delete(k);
     }
-    const expiresAt = this.seen.get(signatureId);
-    if (expiresAt && expiresAt > now) {
-      return false; // Replay detected
+    while (this.seen.size > this.maxEntries) {
+      this.seen.delete(this.seen.keys().next().value as string);
     }
-    this.seen.set(signatureId, now + this.ttlMs);
-    return true;
+  }
+
+  public clear(): void {
+    this.seen.clear();
   }
 }
 
@@ -238,11 +251,16 @@ export async function verifyRequestSignature(
     seenComponents.add(c);
   }
 
-  const sigMatch = signatureHeader.match(new RegExp(`(?:^|,\\s*)${SIGNATURE_LABEL}=:([A-Za-z0-9+/=_-]+):`));
-  if (!sigMatch) {
+  // RFC 8941 byte sequence (`:base64:`), standard alphabet with padding only, so each signature
+  // has exactly one accepted encoding.
+  const sigMatch = signatureHeader.match(new RegExp(`(?:^|,\\s*)${SIGNATURE_LABEL}=:([A-Za-z0-9+/]*={0,2}):(?=\\s*(?:,|$))`));
+  if (!sigMatch || sigMatch[1].length % 4 !== 0) {
     return { valid: false, error: `Signature header does not contain valid ${SIGNATURE_LABEL} byte sequence` };
   }
-  const signatureBase64 = sigMatch[1].trim();
+  const signatureBytes = base64ToBytes(sigMatch[1]);
+  if (bytesToBase64(signatureBytes) !== sigMatch[1]) {
+    return { valid: false, error: `Signature header does not contain valid ${SIGNATURE_LABEL} byte sequence` };
+  }
 
   const createdMatch = signatureParams.match(/created=(\d+)/);
   if (!createdMatch) {
@@ -256,13 +274,6 @@ export async function verifyRequestSignature(
     return { valid: false, error: `Signature timestamp expired or clock skew too large (created=${created}, now=${now})` };
   }
 
-  if (params.replayCheck !== false) {
-    const replayKey = `${signatureBase64}:${created}`;
-    if (!globalReplayCache.checkAndRecord(replayKey)) {
-      return { valid: false, error: "Replay detected: request signature was already presented" };
-    }
-  }
-
   const keyidMatch = signatureParams.match(/keyid="([^"]+)"/);
   const keyid = keyidMatch ? keyidMatch[1] : undefined;
   if (keyid) {
@@ -271,6 +282,13 @@ export async function verifyRequestSignature(
     } catch (e) {
       return { valid: false, error: (e as Error).message };
     }
+  }
+
+  // Entries must outlive the whole acceptance window (created ± maxSkew).
+  const replayKey = `${keyid ?? ""}:${bytesToHex(signatureBytes)}`;
+  const replayTtlMs = 2 * Math.max(maxSkew, 1) * 1000;
+  if (params.replayCheck !== false && globalReplayCache.has(replayKey)) {
+    return { valid: false, error: "Replay detected: request signature was already presented" };
   }
 
   const algMatch = signatureParams.match(/alg="([^"]+)"/);
@@ -299,9 +317,6 @@ export async function verifyRequestSignature(
 
   try {
     const { publicKey } = await loadPublicKey(params.publicKey);
-    const signatureBytes = signatureBase64.includes("-") || signatureBase64.includes("_")
-      ? base64UrlToBytes(signatureBase64)
-      : base64ToBytes(signatureBase64);
 
     const isValid = await globalThis.crypto.subtle.verify(
       "Ed25519",
@@ -314,20 +329,35 @@ export async function verifyRequestSignature(
       return { valid: false, error: "Cryptographic signature verification failed" };
     }
 
+    // Record only verified signatures; re-check synchronously in case a concurrent copy won.
+    if (params.replayCheck !== false) {
+      if (globalReplayCache.has(replayKey)) {
+        return { valid: false, error: "Replay detected: request signature was already presented" };
+      }
+      globalReplayCache.record(replayKey, replayTtlMs);
+    }
+
     return { valid: true, keyid };
   } catch (err) {
     return { valid: false, error: `Verification error: ${(err as Error).message}` };
   }
 }
 
+/** Clock skew tolerated on JWT lease `exp` / `nbf`. */
+export const JWT_CLOCK_SKEW_SECONDS = 60;
+
 /**
  * Zero-egress offline verification for asymmetric JWT token leases.
+ * Requires a numeric `exp` and an audience (`aud` or `serviceSlug`) equal to `expectedServiceSlug`;
+ * a verifier without an expected slug rejects every lease. `iss` is checked when `expectedIssuer` is set.
  */
 export async function verifyJwtLease(params: {
   token: string;
   publicKey: string | PublicJwk | CryptoKey;
   expectedServiceSlug?: string;
+  expectedIssuer?: string;
   currentTime?: number;
+  clockSkewSeconds?: number;
 }): Promise<{ valid: boolean; payload?: Record<string, unknown>; error?: string }> {
   try {
     const parts = params.token.trim().split(".");
@@ -341,9 +371,15 @@ export async function verifyJwtLease(params: {
 
     const header = JSON.parse(headerJson);
     const payload = JSON.parse(payloadJson);
+    if (!header || typeof header !== "object" || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return { valid: false, error: "JWT header and payload must be JSON objects" };
+    }
 
     if (header.alg !== "EdDSA" && header.alg !== "ed25519") {
       return { valid: false, error: `Unsupported JWT alg: ${header.alg}` };
+    }
+    if (header.typ !== undefined && String(header.typ).toUpperCase() !== "JWT") {
+      return { valid: false, error: `Unsupported JWT typ: ${header.typ}` };
     }
 
     const { publicKey } = await loadPublicKey(params.publicKey);
@@ -362,21 +398,41 @@ export async function verifyJwtLease(params: {
     }
 
     const now = params.currentTime ?? Math.floor(Date.now() / 1000);
-    if (payload.exp && typeof payload.exp === "number" && payload.exp < now) {
+    const skew = Math.max(0, Math.min(params.clockSkewSeconds ?? JWT_CLOCK_SKEW_SECONDS, 300));
+    if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
+      return { valid: false, error: "JWT token lease has no numeric exp claim" };
+    }
+    if (payload.exp + skew <= now) {
       return { valid: false, error: "JWT token lease has expired" };
     }
-    if (payload.nbf && typeof payload.nbf === "number" && payload.nbf > now + 60) {
+    if (payload.nbf !== undefined && (typeof payload.nbf !== "number" || payload.nbf > now + skew)) {
       return { valid: false, error: "JWT token lease not active yet" };
     }
 
-    if (params.expectedServiceSlug) {
-      const tokenSlug = (payload.serviceSlug || payload.aud || "").toLowerCase();
-      if (tokenSlug && tokenSlug !== params.expectedServiceSlug.toLowerCase()) {
-        return {
-          valid: false,
-          error: `JWT audience mismatch: expected ${params.expectedServiceSlug}, got ${tokenSlug}`,
-        };
-      }
+    const expected = params.expectedServiceSlug?.trim().toLowerCase();
+    if (!expected) {
+      return { valid: false, error: "JWT audience cannot be checked: no expected service slug is configured" };
+    }
+    const audiences: string[] = [];
+    if (payload.serviceSlug !== undefined) audiences.push(String(payload.serviceSlug));
+    if (Array.isArray(payload.aud)) audiences.push(...payload.aud.map(String));
+    else if (payload.aud !== undefined) audiences.push(String(payload.aud));
+    if (audiences.length === 0) {
+      return { valid: false, error: "JWT token lease has no aud or serviceSlug claim" };
+    }
+    const serviceSlugOk = payload.serviceSlug === undefined || String(payload.serviceSlug).toLowerCase() === expected;
+    const audOk =
+      payload.aud === undefined ||
+      (Array.isArray(payload.aud) ? payload.aud : [payload.aud]).some((a: unknown) => String(a).toLowerCase() === expected);
+    if (!serviceSlugOk || !audOk) {
+      return {
+        valid: false,
+        error: `JWT audience mismatch: expected ${expected}, got ${audiences.join(", ").toLowerCase()}`,
+      };
+    }
+
+    if (params.expectedIssuer && payload.iss !== params.expectedIssuer) {
+      return { valid: false, error: `JWT issuer mismatch: expected ${params.expectedIssuer}, got ${payload.iss ?? "(none)"}` };
     }
 
     return { valid: true, payload };
@@ -397,6 +453,11 @@ export async function registerPublicKey(params: {
   fetchFn?: typeof fetch;
 }): Promise<{ ok: boolean; status: number; error?: string }> {
   const authUrl = (params.authUrl ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
+  try {
+    assertSecureUrl("authUrl", authUrl);
+  } catch (err) {
+    return { ok: false, status: 0, error: (err as Error).message };
+  }
   const registerUrl = `${authUrl}/api/v1/keys/register`;
   const doFetch = params.fetchFn ?? globalThis.fetch;
 

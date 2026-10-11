@@ -9,6 +9,7 @@ export interface ResolvedConfig {
   domain: string | null;
   domainSource: string | null;
   daywalkerPublicKey: string | PublicJwk | null;
+  leaseIssuer: string | null;
   authUrl: string;
   cacheTtlMs: number;
   negativeCacheTtlMs: number;
@@ -61,6 +62,24 @@ export function publicHostname(value: string | undefined | null): string | null 
   return DOMAIN_PATTERN.test(host) ? host : null;
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Throws unless `value` is an https: URL (http: is allowed only for localhost / 127.0.0.1 / [::1]),
+ * so API keys, SDK keys and write keys never travel in cleartext.
+ */
+export function assertSecureUrl(name: string, value: string): void {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an absolute https:// URL (got "${value}")`);
+  }
+  if (url.protocol === "https:") return;
+  if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) return;
+  throw new Error(`${name} must use https:// (http:// is only allowed for localhost); got "${value}"`);
+}
+
 export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const env: Record<string, string | undefined> =
     options.env ?? (typeof process !== "undefined" && process.env ? process.env : {});
@@ -97,7 +116,9 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   }
 
   const daywalkerPublicKey = options.daywalkerPublicKey ?? (env.DAYWALKER_PUBLIC_KEY ? env.DAYWALKER_PUBLIC_KEY.trim() : null);
+  const leaseIssuer = (options.leaseIssuer ?? env.DAYWALKER_LEASE_ISSUER ?? "").trim() || null;
   const authUrl = (options.authUrl ?? env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
+  assertSecureUrl("authUrl", authUrl);
   const cacheTtlMs = options.cacheTtlMs ?? 60_000;
   const negativeCacheTtlMs = options.negativeCacheTtlMs ?? 3_000;
   const maxRetries = options.maxRetries ?? (options.retry?.maxRetries ?? 3);
@@ -111,6 +132,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     domain,
     domainSource,
     daywalkerPublicKey,
+    leaseIssuer,
     authUrl,
     cacheTtlMs,
     negativeCacheTtlMs,
