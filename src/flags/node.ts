@@ -2,11 +2,12 @@ import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Evaluator, MemoryStore, evaluateFlag, parseContext, type ContextInput, type EvaluationDetail, type FlagConfig, type FlagValue, type SegmentConfig } from "./engine/index.js";
 import { EventProcessor, SseClient, noopLogger, type Logger } from "./common/index.js";
+import { assertSecureUrl } from "../config.js";
 
 export type { ContextInput, EvaluationDetail, FlagValue, Logger };
 
 export interface NodeClientOptions {
-  /** Base URL of your DevPulse deployment. */
+  /** Base URL of your DevPulse deployment (https required except on localhost). */
   baseUrl: string;
   /** Real-time updates over SSE (default). Set false to poll instead. */
   stream?: boolean;
@@ -72,6 +73,8 @@ export class DevPulseNodeClient extends EventEmitter {
       this.markReady();
       return;
     }
+    // Checked once the SDK key will actually be sent (offline / fixture clients make no requests).
+    assertSecureUrl("baseUrl", options.baseUrl);
     if (options.sendEvents !== false) {
       this.events = new EventProcessor({
         url: `${this.base}/sdk/v1/events`,

@@ -27,6 +27,6 @@ await analytics.shutdown();
 
 Add each flag's value to events (for breakdowns by variation) with `flags: client` where `client` is a `@shelbyb/daywalker-sdk/flags` instance (anything with `allFlags()`).
 
-Options: `autocapturePageviews` (default true), `flushAt` (20), `flushInterval` (2s browser / 10s Node), `maxQueueSize` (1000), `persistence` (`localStorage` | `memory`), `sessionTimeoutMinutes` (30), `respectDoNotTrack`, `optedOut` (consent), `onError`.
+Options: `autocapturePageviews` (default true), `flushAt` (20), `flushInterval` (2s browser / 10s Node), `maxQueueSize` (1000), `persistence` (`localStorage` | `memory`), `sessionTimeoutMinutes` (30), `respectDoNotTrack`, `optedOut` (consent), `captureFullUrls` (default false: URLs drop the fragment and all query parameters except `utm_*`, `gclid`, `fbclid`, `ref`), `onError`. `host` must be `https://` except on localhost.
 
 Events are sent to `POST {host}/a/batch`, which also accepts PostHog's capture format.
