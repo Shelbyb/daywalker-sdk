@@ -1,6 +1,44 @@
 import { daywalker, Daywalker } from "./client.js";
 import type { TokenPayload, ValidateResult } from "./types.js";
 
+type ValidateFailure = Extract<ValidateResult, { ok: false }>;
+
+/** Error codes that mean Daywalker Auth itself could not be reached or is degraded. */
+const UNAVAILABLE_ERROR_CODES = new Set(["NETWORK_ERROR", "SERVICE_UNAVAILABLE"]);
+
+export interface AuthFailureResponse {
+  /** 401 bad/expired/missing token, 429 rate limited, 500 server misconfiguration, 503 auth service unavailable. */
+  status: 401 | 429 | 500 | 503;
+  error: string;
+  message: string;
+  retryAfter?: number;
+}
+
+/**
+ * Maps a failed validation to the HTTP status an adapter should answer with. Outages (5xx,
+ * network errors, SERVICE_UNAVAILABLE) become 503 rather than 401 so clients retry instead of
+ * discarding a valid token; configuration errors become a 500 without their (internal) details.
+ * Shared by the Next, Web/Hono and Express adapters.
+ */
+export function toAuthFailureResponse(result: ValidateFailure): AuthFailureResponse {
+  const retryAfter = result.retryAfter && result.retryAfter > 0 ? result.retryAfter : undefined;
+  if (result.error === "CONFIGURATION_ERROR") {
+    return { status: 500, error: "CONFIGURATION_ERROR", message: "Authentication is not configured correctly on this server." };
+  }
+  if (result.status === 429 || result.error === "RATE_LIMITED") {
+    return { status: 429, error: "RATE_LIMITED", message: result.message || "Rate limit exceeded", retryAfter };
+  }
+  if (result.status >= 500 || result.status === 0 || UNAVAILABLE_ERROR_CODES.has(result.error)) {
+    return {
+      status: 503,
+      error: UNAVAILABLE_ERROR_CODES.has(result.error) ? result.error : "SERVICE_UNAVAILABLE",
+      message: "Daywalker Auth is temporarily unavailable. Please retry.",
+      retryAfter,
+    };
+  }
+  return { status: 401, error: result.error || "INVALID_TOKEN", message: result.message || "Unauthorized" };
+}
+
 export interface DaywalkerMiddlewareOptions {
   client?: Daywalker;
   serviceSlug?: string;
@@ -65,13 +103,8 @@ export function daywalkerAuth(options: DaywalkerMiddlewareOptions = {}) {
 
     const result = await client.validateToken(token, { serviceSlug });
     if (!result.ok) {
-      const status = result.status === 429 ? 429 : 401;
-      const body = {
-        error: result.error,
-        message: result.message,
-        retryAfter: result.retryAfter,
-      };
-      const headers = result.retryAfter ? { "Retry-After": String(result.retryAfter) } : undefined;
+      const { status, ...body } = toAuthFailureResponse(result);
+      const headers = body.retryAfter ? { "Retry-After": String(body.retryAfter) } : undefined;
 
       if (typeof c?.json === "function") {
         return c.json(body, status, headers);
