@@ -1,4 +1,5 @@
 import { assertSecureUrl } from "../config.js";
+import { SDK_VERSION } from "../flags/common/version.js";
 
 /**
  * DevPulse product analytics. Works in browsers (automatic page views,
@@ -40,6 +41,14 @@ export type AnalyticsOptions = {
    * so OAuth codes, reset tokens and the like never leave the page.
    */
   captureFullUrls?: boolean;
+  /**
+   * Rewrite URL paths before they leave the page: applied to $pathname, $initial_pathname and the
+   * path of every URL sent ($current_url, $referrer, $initial_current_url, $initial_referrer).
+   * Use it for secrets embedded in paths, e.g.
+   * `sanitizePath: (p) => p.replace(/^\/reset\/[^/]+/, "/reset/:token")`. Default: unchanged.
+   * If it throws, the path is sent as "/".
+   */
+  sanitizePath?: (path: string) => string;
   fetch?: typeof fetch;
   onError?: (err: Error) => void;
 };
@@ -55,7 +64,14 @@ export type CaptureOptions = {
 type Event = { uuid: string; event: string; distinct_id: string; timestamp: string; properties: Properties; $set?: Properties; $set_once?: Properties };
 type State = { distinctId: string; identified: boolean; props: Properties; session?: { id: string; last: number; start: number }; initialSent?: boolean; optedOut?: boolean };
 
-export const VERSION = "0.1.0";
+export const VERSION = SDK_VERSION;
+/** keepalive fetches and sendBeacon share a 64 KiB in-flight budget in browsers. */
+const KEEPALIVE_MAX_BYTES = 60_000;
+/** Stay well under DevPulse's 2 MB capture body limit. */
+const MAX_BATCH_BYTES = 1_000_000;
+const MAX_BATCH_EVENTS = 100;
+const encoder = new TextEncoder();
+const byteLength = (s: string) => encoder.encode(s).length;
 const KEPT_QUERY_PARAMS = new Set(["utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "gclid", "fbclid", "ref"]);
 
 /** Drop the fragment and every query parameter outside the campaign allowlist. */
@@ -170,7 +186,7 @@ export class Analytics {
         $initial_referrer: document.referrer ? this.url(document.referrer) : "$direct",
         $initial_referring_domain: referringDomain(document.referrer) ?? "$direct",
         $initial_current_url: url,
-        $initial_pathname: location.pathname,
+        $initial_pathname: this.path(location.pathname),
         ...Object.fromEntries(Object.entries(utm).map(([k, v]) => [`$initial_${k}`, v])),
       };
       this.state.initialSent = true;
@@ -247,6 +263,10 @@ export class Analytics {
     clearTimeout(this.timer);
     this.timer = undefined;
     while (this.queue.length) {
+      if (this.state.optedOut) {
+        this.queue = [];
+        return;
+      }
       if (this.sending) await this.sending;
       else {
         this.sending = this.send().finally(() => (this.sending = null));
@@ -280,7 +300,7 @@ export class Analytics {
       ...base,
       $current_url: this.url(location.href),
       $host: location.host,
-      $pathname: location.pathname,
+      $pathname: this.path(location.pathname),
       $referrer: document.referrer ? this.url(document.referrer) : "$direct",
       $referring_domain: referringDomain(document.referrer) ?? "$direct",
       $screen_width: screen.width,
@@ -293,7 +313,25 @@ export class Analytics {
   }
 
   private url(raw: string): string {
-    return this.opts.captureFullUrls ? raw : sanitizeUrl(raw);
+    const out = this.opts.captureFullUrls ? raw : sanitizeUrl(raw);
+    if (!this.opts.sanitizePath || !out) return out;
+    try {
+      const u = new URL(out);
+      u.pathname = this.path(u.pathname);
+      return u.toString();
+    } catch {
+      return this.path(out);
+    }
+  }
+
+  private path(p: string): string {
+    if (!this.opts.sanitizePath) return p;
+    try {
+      return this.opts.sanitizePath(p);
+    } catch (err) {
+      this.opts.onError?.(err as Error);
+      return "/";
+    }
   }
 
   private flagProps(): Properties {
@@ -332,17 +370,38 @@ export class Analytics {
     (this.timer as { unref?: () => void }).unref?.();
   }
 
+  /** Take up to MAX_BATCH_EVENTS queued events whose body stays under maxBytes (always at least one). */
+  private takeBatch(maxBytes: number): { batch: Event[]; body: string } {
+    const sentAt = new Date().toISOString();
+    const encode = (batch: Event[]) => JSON.stringify({ api_key: this.opts.writeKey, batch, sent_at: sentAt });
+    let size = byteLength(encode([]));
+    let n = 0;
+    while (n < Math.min(MAX_BATCH_EVENTS, this.queue.length)) {
+      const add = byteLength(JSON.stringify(this.queue[n])) + (n ? 1 : 0);
+      if (n && size + add > maxBytes) break;
+      size += add;
+      n++;
+    }
+    const batch = this.queue.splice(0, n);
+    return { batch, body: encode(batch) };
+  }
+
   /** Send one batch; on failure requeue it and back off. Resolves true when sent (or dropped as invalid). */
   private async send(): Promise<boolean> {
-    const batch = this.queue.splice(0, 100);
+    if (this.state.optedOut) {
+      this.queue = [];
+      return true;
+    }
+    const { batch, body } = this.takeBatch(MAX_BATCH_BYTES);
     if (!batch.length) return true;
     const f = this.opts.fetch ?? globalThis.fetch;
     try {
       const res = await f(this.endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ api_key: this.opts.writeKey, batch, sent_at: new Date().toISOString() }),
-        keepalive: isBrowser,
+        body,
+        // Browsers reject keepalive bodies over 64 KiB outright, so only small ones get it.
+        keepalive: isBrowser && byteLength(body) < KEEPALIVE_MAX_BYTES,
       });
       if (res.ok || (res.status >= 400 && res.status < 500 && res.status !== 429)) {
         if (!res.ok) this.opts.onError?.(new Error(`DevPulse analytics rejected ${batch.length} events: HTTP ${res.status}`));
@@ -351,6 +410,11 @@ export class Analytics {
       }
       throw new Error(`HTTP ${res.status}`);
     } catch (err) {
+      // Opted out while this was in flight: the batch must not be retried.
+      if (this.state.optedOut) {
+        this.queue = [];
+        return false;
+      }
       this.queue.unshift(...batch);
       this.backoff = Math.min(60_000, (this.backoff || 1000) * 2);
       this.opts.onError?.(err as Error);
@@ -359,13 +423,20 @@ export class Analytics {
     }
   }
 
-  /** On page hide, hand the queue to sendBeacon so it survives navigation. */
+  /**
+   * On page hide, hand the queue to sendBeacon so it survives navigation, in batches under the
+   * browser's 64 KiB beacon budget; whatever doesn't fit stays queued (and persists in memory).
+   */
   private beacon() {
-    if (!this.queue.length || typeof navigator.sendBeacon !== "function") return;
-    const batch = this.queue.splice(0, 100);
-    const body = JSON.stringify({ api_key: this.opts.writeKey, batch, sent_at: new Date().toISOString() });
-    // text/plain avoids a CORS preflight, which beacons can't do.
-    if (!navigator.sendBeacon(this.endpoint, new Blob([body], { type: "text/plain" }))) this.queue.unshift(...batch);
+    if (this.state.optedOut || typeof navigator.sendBeacon !== "function") return;
+    while (this.queue.length) {
+      const { batch, body } = this.takeBatch(KEEPALIVE_MAX_BYTES);
+      // text/plain avoids a CORS preflight, which beacons can't do.
+      if (byteLength(body) >= KEEPALIVE_MAX_BYTES || !navigator.sendBeacon(this.endpoint, new Blob([body], { type: "text/plain" }))) {
+        this.queue.unshift(...batch);
+        return;
+      }
+    }
   }
 
   private attachBrowser() {

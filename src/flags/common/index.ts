@@ -1,5 +1,5 @@
-export { SseParser, SseClient, SseError, backoffDelay, type SseEvent, type SseClientOptions } from "./sse.js";
-export { EventProcessor, noopLogger, type EventProcessorOptions, type Logger } from "./events.js";
+export { SseParser, SseClient, SseError, backoffDelay, DEFAULT_MAX_EVENT_SIZE, MIN_SERVER_RETRY_MS, type SseEvent, type SseClientOptions } from "./sse.js";
+export { EventProcessor, noopLogger, chunkEvents, MAX_EVENTS_PER_REQUEST, MAX_REQUEST_BYTES, KEEPALIVE_MAX_BYTES, type EventProcessorOptions, type Logger } from "./events.js";
 
 /** Encode a context for URLs (base64url JSON), matching the DevPulse SDK endpoints. */
 export function encodeContext(context: unknown): string {
@@ -10,4 +10,4 @@ export function encodeContext(context: unknown): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export const SDK_VERSION = "0.1.0";
+export { SDK_VERSION } from "./version.js";

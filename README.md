@@ -1,20 +1,20 @@
 <p align="center">
-  <img src="./assets/logo-512.png" alt="Daywalker" width="160" />
+  <img src="https://raw.githubusercontent.com/Shelbyb/daywalker-sdk/main/assets/logo-512.png" alt="Daywalker" width="160" />
 </p>
 
 # @shelbyb/daywalker-sdk
 
-Zero-dependency, runtime-agnostic client library for [Daywalker Auth](https://auth.daywalker.dev). Supports **RFC 9421 (HTTP Message Signatures)**, **RFC 9530 (Digest Fields)**, **Web Crypto standards**, **Push Architecture key registration**, and **hardened web & Next.js middleware**.
+Runtime-agnostic client library for [Daywalker Auth](https://auth.daywalker.dev). Supports **RFC 9421 (HTTP Message Signatures)**, **RFC 9530 (Digest Fields)**, **Web Crypto standards**, **Push Architecture key registration**, and **hardened web & Next.js middleware**.
 
-Runs seamlessly across **Node.js 18+**, **Bun**, **Deno**, **Cloudflare Workers**, **Next.js Edge**, and standard browser runtimes.
+Runs on **Node.js 20.19+**, **Bun**, **Deno**, **Cloudflare Workers**, **Next.js Edge**, and browsers. ESM only; `require()` works on Node 20.19+ and 22.12+.
 
-- **Zero-Dependency Web Standards Core**: 100% standard `crypto.subtle`, `Uint8Array`, `fetch`, `Request`, and `Response`.
-- **RFC 9421 (HTTP Message Signatures)**: Cryptographically binds `@method`, `@path`, `@authority`, and `content-digest` using Ed25519 signatures (`Signature-Input`, `Signature`).
+- **Web Standards Core**: standard `crypto.subtle`, `Uint8Array`, `fetch`, `Request`, and `Response`. The one runtime dependency is [`re2js`](https://www.npmjs.com/package/re2js), so flag regex rules run in linear time.
+- **RFC 9421 (HTTP Message Signatures)**: Cryptographically binds `@method`, `@path`, `@query` (when the URL has one), `@authority`, and `content-digest` (POST/PUT/PATCH and any request with a body) using Ed25519 signatures (`Signature-Input`, `Signature`).
 - **RFC 9530 (Digest Fields)**: Computes standard `Content-Digest: sha-256=:<base64>:` headers for payload integrity.
 - **Class-Based Client Architecture**: Instantiable `Daywalker` client supporting dependency injection, with a lazy default singleton for plug-and-play simplicity.
-- **Resilience & Rate Limiting**: Automatic exponential backoff with jitter and `Retry-After` header parsing directly inside client fetch requests.
+- **Resilience & Rate Limiting**: 5s per-attempt timeout, exponential backoff with jitter, `Retry-After` honored up to 60s. Network errors are retried only for idempotent requests (or with an `idempotencyKey`), and redirects are never followed, so the API key can't leak to another host.
 - **Deterministic Type-Safe Results**: Discriminated union returns (`Result<T, E>`) for clean handling without try/catch boilerplate.
-- **Security-Hardened Next.js Middleware**: Built-in Server Action probe mitigation (CVE-2025-55182 defense), health check bypass, and self-healing diagnostic error routing.
+- **Security-Hardened Next.js Middleware**: Built-in Server Action probe mitigation (CVE-2025-55182 defense), normalized paths (no `%2e%2e` / `//` bypasses), open-redirect-safe error routing, and fail-closed validation (503 when Daywalker is unreachable).
 - **Zero-Egress Inbound Verification**: In-memory caching (60–300s TTL) and offline JWT token lease validation using Daywalker's asymmetric public key.
 - **Decoupled Push Architecture CLI**: `npx daywalker init --json` registers keys directly via `POST /api/v1/keys/register` with zero runtime reverse-HTTP calls.
 
@@ -34,17 +34,19 @@ npm install @shelbyb/daywalker-sdk
 # Generate Ed25519 keypair and write .env.local
 npx daywalker init --service my-service-slug
 
-# Or register the public key immediately with Daywalker Auth (domain is required by the API):
-npx daywalker init --service my-service-slug --domain app.example.com --api-key srv_live_...
+# Register the public key with Daywalker Auth (domain is required by the API).
+# The API key comes from DAYWALKER_API_KEY, or from stdin so it stays out of shell history:
+op read op://vault/daywalker/api-key | npx daywalker init --service my-service-slug --domain app.example.com --api-key-stdin
 
-# Pipe JSON secrets directly into Vercel, Fly.io, DigitalOcean, or AWS SSM:
-npx daywalker init --service my-service-slug --api-key srv_live_... --json
+# Print JSON for Vercel, Fly.io, DigitalOcean, or AWS SSM (nothing written to disk):
+DAYWALKER_API_KEY=srv_live_... npx daywalker init --service my-service-slug --domain app.example.com --json
 ```
 
 `daywalker init`:
 - Generates an Ed25519 keypair locally using WebCrypto (`crypto.subtle`)
 - Registers the public JWK directly with `POST https://auth.daywalker.dev/api/v1/keys/register` (`Authorization: Bearer <API key>`, body `{ keyId, domain, publicKey }`; responds `201`)
-- Writes `DAYWALKER_SERVICE_SLUG`, `DAYWALKER_KEY_ID`, `DAYWALKER_SIGNING_KEY`, and `DAYWALKER_AUTH_URL` to `.env.local`
+- Writes `DAYWALKER_SERVICE_SLUG`, `DAYWALKER_KEY_ID`, `DAYWALKER_SIGNING_KEY`, and `DAYWALKER_AUTH_URL` to `.env.local` (atomically, mode `0600`), and only after registration succeeds. `--skip-register` writes without registering.
+- `--force` replaces an existing key and keeps the old one as `DAYWALKER_SIGNING_KEY_PREVIOUS`
 - No route injectors or public `/.well-known/` endpoints needed
 
 The private key is never printed unless you pass `--print-key`.
@@ -79,6 +81,7 @@ const client = new Daywalker({
   apiKey: process.env.DAYWALKER_API_KEY,
   serviceSlug: "sonalyze",
   maxRetries: 3,
+  timeoutMs: 5000, // per attempt (default)
 });
 
 // Option 2: Default lazy singleton (reads process.env automatically)
@@ -89,6 +92,7 @@ if (result.ok) {
   console.log("Validated tenant:", result.data.tenantId);
   console.log("Rate limit remaining:", result.data.rateLimit.remaining);
 } else {
+  // SERVICE_UNAVAILABLE (503) when Daywalker can't be reached: the token is NOT treated as valid.
   console.error(`Validation failed (${result.status} ${result.error}): ${result.message}`);
 }
 ```
@@ -96,6 +100,8 @@ if (result.ok) {
 ### Type-Safe Verification & Error Handling
 
 ```ts
+import { DaywalkerRateLimitError } from "@shelbyb/daywalker-sdk";
+
 // requireValidToken returns data or throws DaywalkerAuthError / DaywalkerRateLimitError
 try {
   const auth = await client.requireValidToken(req.headers.get("x-api-token"));
@@ -115,6 +121,7 @@ try {
 const res = await client.fetch("/api/v1/tokens/validate", {
   method: "POST",
   body: { token: "user_token", serviceSlug: "other-service" },
+  idempotencyKey: crypto.randomUUID(), // optional: lets a POST be retried after a network error
 });
 ```
 
@@ -123,21 +130,22 @@ const res = await client.fetch("/api/v1/tokens/validate", {
 ## Hardened Next.js Middleware (`@shelbyb/daywalker-sdk/next`)
 
 ```ts
-// middleware.ts
-import { createDaywalkerMiddleware } from "@shelbyb/daywalker-sdk/next";
+// proxy.ts (Next.js 16; middleware.ts with `export const middleware = createDaywalkerMiddleware(...)` on 15)
+import { createDaywalkerProxy } from "@shelbyb/daywalker-sdk/next";
 
-export const middleware = createDaywalkerMiddleware({
+export const proxy = createDaywalkerProxy({
   serviceSlug: "sonalyze",
   errorPath: "/service-error", // redirect unauthorized web visitors
   validateServerActions: true, // drops malformed CVE-2025-55182 scanner probes
 });
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  // Keep public files out with the matcher: list what is public, not what isn't.
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|robots.txt|images/).*)"],
 };
 ```
 
-Each request must carry `Authorization: Bearer <token>` or `x-api-token`; without one, API routes get `401` and pages redirect to `errorPath`. Only `/_next/static/`, `/_next/image`, the favicon and static file extensions outside `/api/` skip auth. To gate the app on this service's own API key instead (the self-healing error page), use `createDaywalkerServiceHealthMiddleware` with the same options.
+Each request must carry `Authorization: Bearer <token>` or `x-api-token`; without one, API routes get `401` and pages redirect to `errorPath` (without an error message in the URL). Paths are decoded and normalized before any check, so `/_next/static/../admin` is authenticated. Only `/_next/static/`, `/_next/image`, `/favicon.ico`, `/robots.txt`, `/sitemap.xml` and the health paths skip auth by default. File extensions say nothing about whether a route is public, so they no longer skip auth; opt in with `staticFileExtensions: STATIC_FILE_EXTENSIONS` if you rely on that. When Daywalker is unreachable the middleware answers `503`, and `500` for a configuration error. To gate the app on this service's own API key instead (the self-healing error page), use `createDaywalkerServiceHealthMiddleware` with the same options.
 
 ### Route Handler Wrapper
 
@@ -193,9 +201,9 @@ Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) equal to your s
 
 | Command | Description |
 |---|---|
-| `npx daywalker init --service <slug> [--api-key <key>] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
+| `npx daywalker init --service <slug> [--domain <host>] [--api-key-stdin] [--skip-register] [--force] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
 | `npx daywalker check` | Validate configuration, signature readiness, and connection |
-| `npx daywalker rotate [--api-key <key>] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
+| `npx daywalker rotate [--api-key-stdin] [--skip-register] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
 
 ---
 
@@ -215,20 +223,20 @@ Inbound tokens may be supplied as `x-api-token: srv_live_...` or `Authorization:
 ## Request Signing Specification (RFC 9421 & RFC 9530)
 
 Each outbound request signed by `@shelbyb/daywalker-sdk` includes:
-- `Content-Digest: sha-256=:<base64-encoded-hash>:`
-- `Signature-Input: sig1=("@method" "@path" "@authority" "content-digest");created=<unix_seconds>;keyid="<kid>";alg="ed25519";nonce="<random>"`
+- `Content-Digest: sha-256=:<base64-encoded-hash>:` (POST/PUT/PATCH, and any request with a body)
+- `Signature-Input: sig1=("@method" "@path" "@authority" "content-digest");created=<unix_seconds>;keyid="<kid>";alg="ed25519";nonce="<random>"`. `"@query"` is added after `"@path"` when the URL has a query string; `"content-digest"` is left out only for bodyless GET/HEAD/DELETE/OPTIONS requests.
 - `Signature: sig1=:<base64-encoded-signature>:`
 - `Authorization: Bearer <DAYWALKER_API_KEY>`
 
 A fresh random `nonce` is generated for every attempt (including retries), so identical requests in the same second still produce unique signatures and never trip replay protection. `validateToken()` also shares one in-flight request between concurrent callers for the same token, and briefly caches failures (`negativeCacheTtlMs`, default 3000ms; 429s and network errors are never cached).
 
-The exact signature base and test cases are verified against [`test-vectors/signing-rfc9421.json`](./test-vectors/signing-rfc9421.json).
+Verification reads the covered components from `Signature-Input`, requires `content-digest` to be covered whenever there is a body, and rejects replays. The default replay cache is per process: with several instances, pass a shared `replayStore` (e.g. Redis `SET NX PX`). The exact signature base and test cases are verified against [`test-vectors/signing-rfc9421.json`](./test-vectors/signing-rfc9421.json).
 
 ---
 
 ## DevPulse SDKs (one package)
 
-The same package ships the [DevPulse](https://github.com/shelbyb/devpulse) client SDKs as subpath exports. Each subpath is tree-shakeable and has zero dependencies; `react` and the OpenFeature SDKs are optional peer dependencies used only by their subpaths.
+The same package ships the [DevPulse](https://github.com/shelbyb/devpulse) client SDKs as subpath exports. Each subpath is tree-shakeable; `react` and the OpenFeature SDKs are optional peer dependencies used only by their subpaths.
 
 | Import | What it is | Docs |
 |---|---|---|
