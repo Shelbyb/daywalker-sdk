@@ -1,0 +1,102 @@
+{
+  "description": "Shared flag-evaluation vectors for the DevPulse server engine (@devpulse/flag-engine) and every SDK. For each case, evaluateFlag(store(flags, segments), flag, context, default) must return exactly `expect` (value, variationIndex, reason). `matches` uses RE2 semantics: no lookaround or backreferences (never match), (?i) flags work, patterns over 500 chars and inputs over 1024 chars never match.",
+  "version": 1,
+  "flags": {
+    "off-flag": { "key": "off-flag", "version": 1, "on": false, "salt": "s", "variations": ["a", "b"], "offVariation": 1, "fallthrough": { "variation": 0 }, "targets": [], "rules": [], "prerequisites": [] },
+    "off-no-variation": { "key": "off-no-variation", "version": 1, "on": false, "salt": "s", "variations": [true, false], "offVariation": null, "fallthrough": { "variation": 0 }, "targets": [], "rules": [], "prerequisites": [] },
+    "targeted": {
+      "key": "targeted", "version": 3, "on": true, "salt": "s", "variations": [false, true], "offVariation": 0, "fallthrough": { "variation": 0 },
+      "targets": [{ "values": ["vip-1", "vip-2"], "variation": 1 }, { "contextKind": "org", "values": ["acme"], "variation": 1 }],
+      "rules": [], "prerequisites": []
+    },
+    "email-regex": {
+      "key": "email-regex", "version": 1, "on": true, "salt": "s", "variations": ["off", "on"], "offVariation": 0, "fallthrough": { "variation": 0 }, "targets": [], "prerequisites": [],
+      "rules": [
+        { "id": "dotted", "clauses": [{ "attribute": "email", "op": "matches", "values": ["^[a-z]+(\\.[a-z]+)*@acme\\.com$"] }], "variation": 1 }
+      ]
+    },
+    "regex-features": {
+      "key": "regex-features", "version": 1, "on": true, "salt": "s", "variations": ["none", "lookahead", "backref", "icase", "repeat-group"], "offVariation": 0, "fallthrough": { "variation": 0 }, "targets": [], "prerequisites": [],
+      "rules": [
+        { "id": "lookahead", "clauses": [{ "attribute": "name", "op": "matches", "values": ["^(?!test).*$"] }], "variation": 1 },
+        { "id": "backref", "clauses": [{ "attribute": "name", "op": "matches", "values": ["^(a)\\1$"] }], "variation": 2 },
+        { "id": "icase", "clauses": [{ "attribute": "name", "op": "matches", "values": ["(?i)^ADMIN"] }], "variation": 3 },
+        { "id": "repeat-group", "clauses": [{ "attribute": "name", "op": "matches", "values": ["^(\\d{3})+$", "^(foo|bar)+$"] }], "variation": 4 }
+      ]
+    },
+    "segment-flag": {
+      "key": "segment-flag", "version": 2, "on": true, "salt": "s", "variations": [0, 10, 20], "offVariation": 0, "fallthrough": { "variation": 0 }, "targets": [], "prerequisites": [],
+      "rules": [
+        { "id": "not-beta", "clauses": [{ "attribute": "segmentMatch", "op": "segmentMatch", "values": ["beta"], "negate": true }, { "attribute": "plan", "op": "in", "values": ["pro"] }], "variation": 2 },
+        { "id": "beta", "clauses": [{ "attribute": "segmentMatch", "op": "segmentMatch", "values": ["beta"] }], "variation": 1 }
+      ]
+    },
+    "prereq-child": {
+      "key": "prereq-child", "version": 1, "on": true, "salt": "s", "variations": ["child-off", "child-on"], "offVariation": 0, "fallthrough": { "variation": 1 }, "targets": [], "rules": [],
+      "prerequisites": [{ "key": "targeted", "variation": 1 }]
+    },
+    "ops": {
+      "key": "ops", "version": 1, "on": true, "salt": "s", "variations": ["none", "semver", "date", "number", "multi-kind"], "offVariation": 0, "fallthrough": { "variation": 0 }, "targets": [], "prerequisites": [],
+      "rules": [
+        { "id": "semver", "clauses": [{ "attribute": "appVersion", "op": "semVerGreaterThan", "values": ["2.0.0"] }], "variation": 1 },
+        { "id": "date", "clauses": [{ "attribute": "signupDate", "op": "after", "values": ["2024-01-01T00:00:00Z"] }], "variation": 2 },
+        { "id": "number", "clauses": [{ "attribute": "/stats/logins", "op": "greaterThanOrEqual", "values": [10] }], "variation": 3 },
+        { "id": "org-tier", "clauses": [{ "contextKind": "org", "attribute": "tier", "op": "in", "values": ["enterprise"] }], "variation": 4 }
+      ]
+    },
+    "rollout": {
+      "key": "rollout", "version": 1, "on": true, "salt": "rollout-salt", "variations": ["control", "treatment"], "offVariation": 0, "targets": [], "rules": [], "prerequisites": [],
+      "fallthrough": { "rollout": { "variations": [{ "variation": 0, "weight": 50000 }, { "variation": 1, "weight": 50000 }] } }
+    },
+    "experiment": {
+      "key": "experiment", "version": 1, "on": true, "salt": "exp-salt", "variations": ["a", "b"], "offVariation": 0, "targets": [], "rules": [], "prerequisites": [],
+      "fallthrough": { "rollout": { "kind": "experiment", "seed": 42, "variations": [{ "variation": 0, "weight": 50000 }, { "variation": 1, "weight": 50000 }] } }
+    },
+    "proto-attr": {
+      "key": "proto-attr", "version": 1, "on": true, "salt": "s", "variations": ["no", "yes"], "offVariation": 0, "fallthrough": { "variation": 0 }, "targets": [], "prerequisites": [],
+      "rules": [{ "id": "ctor", "clauses": [{ "attribute": "constructor", "op": "in", "values": ["x"], "negate": true }, { "attribute": "/toString", "op": "in", "values": ["x"], "negate": true }], "variation": 1 }]
+    },
+    "malformed": { "key": "malformed", "version": 1, "on": true, "salt": "s", "variations": [true], "offVariation": 0, "fallthrough": { "variation": 5 }, "targets": [], "rules": [], "prerequisites": [] }
+  },
+  "segments": {
+    "beta": {
+      "key": "beta", "version": 1, "salt": "seg", "included": [{ "values": ["beta-1"] }], "excluded": [{ "values": ["banned"] }],
+      "rules": [{ "id": "staff", "clauses": [{ "attribute": "email", "op": "endsWith", "values": ["@devpulse.dev"] }] }]
+    }
+  },
+  "cases": [
+    { "name": "off flag serves the off variation", "flag": "off-flag", "context": { "key": "u1" }, "default": "x", "expect": { "value": "b", "variationIndex": 1, "reason": { "kind": "OFF" } } },
+    { "name": "off flag without off variation serves the default", "flag": "off-no-variation", "context": { "key": "u1" }, "default": true, "expect": { "value": true, "variationIndex": null, "reason": { "kind": "OFF" } } },
+    { "name": "user target", "flag": "targeted", "context": { "key": "vip-2" }, "default": false, "expect": { "value": true, "variationIndex": 1, "reason": { "kind": "TARGET_MATCH" } } },
+    { "name": "org target in a multi-kind context", "flag": "targeted", "context": { "kind": "multi", "user": { "key": "u1" }, "org": { "key": "acme" } }, "default": false, "expect": { "value": true, "variationIndex": 1, "reason": { "kind": "TARGET_MATCH" } } },
+    { "name": "no target: fallthrough", "flag": "targeted", "context": { "key": "u1" }, "default": false, "expect": { "value": false, "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "matches: repeated group with quantifier", "flag": "email-regex", "context": { "key": "u1", "email": "jane.doe@acme.com" }, "default": "d", "expect": { "value": "on", "variationIndex": 1, "reason": { "kind": "RULE_MATCH", "ruleIndex": 0, "ruleId": "dotted" } } },
+    { "name": "matches: no match", "flag": "email-regex", "context": { "key": "u1", "email": "jane@evil.com" }, "default": "d", "expect": { "value": "off", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "matches: input of exactly 1024 chars is matched", "flag": "email-regex", "context": { "key": "u1", "email": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@acme.com" }, "default": "d", "expect": { "value": "on", "variationIndex": 1, "reason": { "kind": "RULE_MATCH", "ruleIndex": 0, "ruleId": "dotted" } } },
+    { "name": "matches: input over 1024 chars never matches", "flag": "email-regex", "context": { "key": "u1", "email": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@acme.com" }, "default": "d", "expect": { "value": "off", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "matches: lookahead is invalid RE2 and never matches", "flag": "regex-features", "context": { "key": "u1", "name": "jane" }, "default": "d", "expect": { "value": "none", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "matches: backreference is invalid RE2 and never matches", "flag": "regex-features", "context": { "key": "u1", "name": "aa" }, "default": "d", "expect": { "value": "none", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "matches: (?i) flag", "flag": "regex-features", "context": { "key": "u1", "name": "admin-1" }, "default": "d", "expect": { "value": "icase", "variationIndex": 3, "reason": { "kind": "RULE_MATCH", "ruleIndex": 2, "ruleId": "icase" } } },
+    { "name": "matches: repeated capture group", "flag": "regex-features", "context": { "key": "u1", "name": "123456" }, "default": "d", "expect": { "value": "repeat-group", "variationIndex": 4, "reason": { "kind": "RULE_MATCH", "ruleIndex": 3, "ruleId": "repeat-group" } } },
+    { "name": "matches: alternation group repeated", "flag": "regex-features", "context": { "key": "u1", "name": "foobar" }, "default": "d", "expect": { "value": "repeat-group", "variationIndex": 4, "reason": { "kind": "RULE_MATCH", "ruleIndex": 3, "ruleId": "repeat-group" } } },
+    { "name": "segment: included list", "flag": "segment-flag", "context": { "key": "beta-1", "plan": "pro" }, "default": -1, "expect": { "value": 10, "variationIndex": 1, "reason": { "kind": "RULE_MATCH", "ruleIndex": 1, "ruleId": "beta" } } },
+    { "name": "segment: rule match", "flag": "segment-flag", "context": { "key": "s1", "email": "sam@devpulse.dev" }, "default": -1, "expect": { "value": 10, "variationIndex": 1, "reason": { "kind": "RULE_MATCH", "ruleIndex": 1, "ruleId": "beta" } } },
+    { "name": "segment: excluded beats rules; negated segment clause", "flag": "segment-flag", "context": { "key": "banned", "email": "x@devpulse.dev", "plan": "pro" }, "default": -1, "expect": { "value": 20, "variationIndex": 2, "reason": { "kind": "RULE_MATCH", "ruleIndex": 0, "ruleId": "not-beta" } } },
+    { "name": "prerequisite met", "flag": "prereq-child", "context": { "key": "vip-1" }, "default": "d", "expect": { "value": "child-on", "variationIndex": 1, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "prerequisite failed", "flag": "prereq-child", "context": { "key": "u1" }, "default": "d", "expect": { "value": "child-off", "variationIndex": 0, "reason": { "kind": "PREREQUISITE_FAILED", "prerequisiteKey": "targeted" } } },
+    { "name": "semVerGreaterThan", "flag": "ops", "context": { "key": "u1", "appVersion": "2.1.0-beta.1" }, "default": "d", "expect": { "value": "semver", "variationIndex": 1, "reason": { "kind": "RULE_MATCH", "ruleIndex": 0, "ruleId": "semver" } } },
+    { "name": "after: RFC 3339 string", "flag": "ops", "context": { "key": "u1", "signupDate": "2025-06-01T00:00:00Z" }, "default": "d", "expect": { "value": "date", "variationIndex": 2, "reason": { "kind": "RULE_MATCH", "ruleIndex": 1, "ruleId": "date" } } },
+    { "name": "after: epoch milliseconds", "flag": "ops", "context": { "key": "u1", "signupDate": 1748736000000 }, "default": "d", "expect": { "value": "date", "variationIndex": 2, "reason": { "kind": "RULE_MATCH", "ruleIndex": 1, "ruleId": "date" } } },
+    { "name": "after: non-RFC 3339 string never matches", "flag": "ops", "context": { "key": "u1", "signupDate": "June 1, 2025" }, "default": "d", "expect": { "value": "none", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "JSON pointer attribute", "flag": "ops", "context": { "key": "u1", "stats": { "logins": 12 } }, "default": "d", "expect": { "value": "number", "variationIndex": 3, "reason": { "kind": "RULE_MATCH", "ruleIndex": 2, "ruleId": "number" } } },
+    { "name": "number operators don't coerce strings", "flag": "ops", "context": { "key": "u1", "stats": { "logins": "12" } }, "default": "d", "expect": { "value": "none", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "clause on another context kind", "flag": "ops", "context": { "kind": "multi", "user": { "key": "u1" }, "org": { "key": "o1", "tier": "enterprise" } }, "default": "d", "expect": { "value": "multi-kind", "variationIndex": 4, "reason": { "kind": "RULE_MATCH", "ruleIndex": 3, "ruleId": "org-tier" } } },
+    { "name": "percentage rollout bucket (userKeyA)", "flag": "rollout", "context": { "key": "userKeyA" }, "default": "d", "expect": { "value": "treatment", "variationIndex": 1, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "percentage rollout bucket (userKeyB)", "flag": "rollout", "context": { "key": "userKeyB" }, "default": "d", "expect": { "value": "control", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "experiment marks inExperiment", "flag": "experiment", "context": { "key": "userKeyC" }, "default": "d", "expect": { "value": "b", "variationIndex": 1, "reason": { "kind": "FALLTHROUGH", "inExperiment": true } } },
+    { "name": "inherited Object.prototype names are not attributes (negated clause on a missing attribute never matches)", "flag": "proto-attr", "context": { "key": "u1" }, "default": "d", "expect": { "value": "no", "variationIndex": 0, "reason": { "kind": "FALLTHROUGH" } } },
+    { "name": "missing flag", "flag": "does-not-exist", "context": { "key": "u1" }, "default": "d", "expect": { "value": "d", "variationIndex": null, "reason": { "kind": "ERROR", "errorKind": "FLAG_NOT_FOUND" } } },
+    { "name": "context without key", "flag": "targeted", "context": { "name": "no key" }, "default": false, "expect": { "value": false, "variationIndex": null, "reason": { "kind": "ERROR", "errorKind": "USER_NOT_SPECIFIED" } } },
+    { "name": "variation index out of range", "flag": "malformed", "context": { "key": "u1" }, "default": false, "expect": { "value": false, "variationIndex": null, "reason": { "kind": "ERROR", "errorKind": "MALFORMED_FLAG" } } }
+  ]
+}

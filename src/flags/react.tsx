@@ -1,5 +1,6 @@
+"use client";
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createClient, type ClientOptions, type ContextInput, type DevPulseClient, type EvaluationDetail, type FlagSet, type FlagValue } from "./client.js";
 
 export type { ClientOptions, ContextInput, DevPulseClient, FlagSet, FlagValue };
@@ -18,23 +19,43 @@ export interface DevPulseProviderProps {
 const isBrowser = typeof window !== "undefined";
 
 /**
- * Provides a DevPulse client to the tree. On the server (SSR/RSC streaming)
- * no network connection is opened; flags come from `options.bootstrap`, so the
- * first client render matches the server HTML. Changing `context` calls identify().
+ * Provides a DevPulse client to the tree. On the server (SSR/RSC streaming) and during the
+ * first client render, an offline client serves `options.bootstrap` and makes no requests, so
+ * hydration matches the server HTML. The live client is created (and closed) in an effect,
+ * which keeps StrictMode's simulated unmount from leaving a closed client behind. Changing
+ * `context` calls identify().
  */
 export function DevPulseProvider({ clientSideId, context, options, client: external, children }: DevPulseProviderProps) {
-  const [client] = useState(() => external ?? createClient(clientSideId, context, isBrowser ? options : { ...options, streaming: false, sendEvents: false, bootstrap: options.bootstrap ?? {} }));
   const contextJson = JSON.stringify(context);
-  const first = useRef(true);
+  // Render-time stand-in: no network, timers or listeners, so creating it during render is safe.
+  // No localStorage cache either, so the first client render matches the server HTML.
+  const [placeholder] = useState(() => createClient(clientSideId, context, { ...options, offline: true, sendEvents: false, cache: false }));
+  const [owned, setOwned] = useState<DevPulseClient | null>(null);
+  const latest = useRef({ contextJson, options });
+  latest.current = { contextJson, options };
+
   useEffect(() => {
-    if (first.current) {
-      first.current = false;
-      return;
-    }
-    void client.identify(JSON.parse(contextJson) as ContextInput);
-  }, [client, contextJson]);
-  useEffect(() => () => void (!external && client.close()), [client, external]);
-  return <ClientContext.Provider value={client}>{children}</ClientContext.Provider>;
+    if (external || !isBrowser) return;
+    const c = createClient(clientSideId, JSON.parse(latest.current.contextJson) as ContextInput, latest.current.options);
+    setOwned(c);
+    return () => {
+      void c.close();
+      setOwned((cur) => (cur === c ? null : cur));
+    };
+  }, [external, clientSideId]);
+
+  const live = external ?? owned;
+  const seen = useRef<{ client: DevPulseClient | null; contextJson: string }>({ client: null, contextJson });
+  useEffect(() => {
+    if (!live || live.isClosed) return;
+    const prev = seen.current;
+    seen.current = { client: live, contextJson };
+    // A client we just created already has the current context; an injected one is taken as is.
+    const changed = prev.client === live ? prev.contextJson !== contextJson : live === owned && JSON.stringify(live.getContext()) !== contextJson;
+    if (changed) void live.identify(JSON.parse(contextJson) as ContextInput).catch(() => undefined);
+  }, [live, owned, contextJson]);
+
+  return <ClientContext.Provider value={live ?? placeholder}>{children}</ClientContext.Provider>;
 }
 
 export function useDevPulseClient(): DevPulseClient {
@@ -55,8 +76,16 @@ export function useFlagDetail<T extends FlagValue>(key: string, defaultValue: T)
   // Snapshot is the serialized value so useSyncExternalStore sees stable identities.
   const snapshot = () => JSON.stringify(client.allFlags()[key] ?? null);
   const serialized = useSyncExternalStore(subscribe, snapshot, snapshot);
-  // Record the evaluation (analytics) once per distinct value.
-  return useMemo(() => client.variationDetail(key, JSON.parse(defaultJson) as T), [client, key, defaultJson, serialized]); // eslint-disable-line react-hooks/exhaustive-deps
+  const detail = useMemo(() => client.peekVariationDetail(key, JSON.parse(defaultJson) as T), [client, key, defaultJson, serialized]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Record the evaluation (analytics) after commit, once per distinct result: renders can be
+  // repeated or thrown away (StrictMode, concurrent rendering), effects re-run in StrictMode.
+  const recorded = useRef<unknown>(null);
+  useEffect(() => {
+    if (recorded.current === detail) return;
+    recorded.current = detail;
+    client.recordEvaluation(key, JSON.parse(defaultJson) as T, detail);
+  }, [client, key, defaultJson, detail]);
+  return detail;
 }
 
 /** All flag values; re-renders when any flag changes. */
@@ -74,8 +103,8 @@ export function useFlagsReady(): boolean {
   return useSyncExternalStore(subscribe, () => client.isInitialized, () => client.isInitialized);
 }
 
-/** Track a custom event for metrics and experiments. */
+/** Track a custom event for metrics and experiments. Stable across renders (safe in effect deps). */
 export function useTrack() {
   const client = useDevPulseClient();
-  return (key: string, data?: unknown, metricValue?: number) => client.track(key, data, metricValue);
+  return useCallback((key: string, data?: unknown, metricValue?: number) => client.track(key, data, metricValue), [client]);
 }

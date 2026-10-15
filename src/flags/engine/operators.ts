@@ -1,17 +1,50 @@
+import { RE2JS } from "re2js";
 import { compareSemVer, parseSemVer } from "./semver.js";
 import type { FlagValue, Operator } from "./types.js";
 
-const regexCache = new Map<string, RegExp | null>();
-
-/** `matches` limits: longer inputs or patterns never match. */
+/** `matches` limits: longer inputs or patterns never match (same limits as the DevPulse server). */
 export const MAX_MATCH_INPUT_LENGTH = 1024;
 export const MAX_MATCH_PATTERN_LENGTH = 500;
+/** Server-parity aliases (`@devpulse/flag-engine` names). */
+export const MAX_PATTERN_LENGTH = MAX_MATCH_PATTERN_LENGTH;
+export const MAX_MATCH_INPUT = MAX_MATCH_INPUT_LENGTH;
 
-let warnedUnsafePattern = false;
+/** A compiled user pattern: only `test()` is exposed. */
+export type SafeRegex = { test(input: string): boolean };
+
+const regexCache = new Map<string, SafeRegex | null>();
 
 /**
- * Conservative ReDoS heuristic: a group that contains a quantifier or alternation and is itself
- * repeated (`(a+)+`, `(a*)*`, `(a|aa)+`, `(?:x+y)*`, `(a+){2,}`). Character classes and escapes are skipped.
+ * Compile a user-supplied pattern with RE2 (linear-time matching, no backtracking), so no
+ * pattern can stall the process however it's written (ReDoS), and every SDK agrees with the
+ * DevPulse server on what matches. RE2 has no backreferences or lookaround; patterns using
+ * them don't compile and return null (never match).
+ */
+export function compilePattern(pattern: string): SafeRegex | null {
+  if (!regexCache.has(pattern)) {
+    let re: SafeRegex | null = null;
+    if (pattern.length <= MAX_MATCH_PATTERN_LENGTH) {
+      try {
+        re = RE2JS.compile(pattern);
+      } catch {
+        re = null;
+      }
+    }
+    if (regexCache.size > 1000) regexCache.clear();
+    regexCache.set(pattern, re);
+  }
+  return regexCache.get(pattern)!;
+}
+
+/** Whether a `matches` pattern is accepted: bounded length and valid RE2 syntax. */
+export function isSafePattern(pattern: string): boolean {
+  return compilePattern(pattern) !== null;
+}
+
+/**
+ * @deprecated No longer used: `matches` runs on RE2, which is immune to ReDoS. Kept for
+ * backwards compatibility. Conservative heuristic for a group that contains a quantifier or
+ * alternation and is itself repeated (`(a+)+`, `(a|aa)+`, `(a+){2,}`).
  */
 export function hasNestedQuantifier(pattern: string): boolean {
   const stack: boolean[] = []; // per open group: contains a quantifier / alternation
@@ -35,27 +68,6 @@ export function hasNestedQuantifier(pattern: string): boolean {
     }
   }
   return false;
-}
-
-function regex(pattern: string): RegExp | null {
-  if (!regexCache.has(pattern)) {
-    let re: RegExp | null = null;
-    if (pattern.length > MAX_MATCH_PATTERN_LENGTH || hasNestedQuantifier(pattern)) {
-      if (!warnedUnsafePattern) {
-        warnedUnsafePattern = true;
-        console.warn("DevPulse: a `matches` pattern was too long or had nested quantifiers and is treated as no match");
-      }
-    } else {
-      try {
-        re = new RegExp(pattern);
-      } catch {
-        re = null;
-      }
-    }
-    if (regexCache.size > 1000) regexCache.clear();
-    regexCache.set(pattern, re);
-  }
-  return regexCache.get(pattern)!;
 }
 
 /** RFC 3339 timestamp or Unix milliseconds → epoch ms. */
@@ -88,9 +100,8 @@ export function applyOperator(op: Exclude<Operator, "segmentMatch">, actual: unk
     case "contains":
       return typeof actual === "string" && typeof expected === "string" && actual.includes(expected);
     case "matches": {
-      if (typeof actual !== "string" || typeof expected !== "string") return false;
-      if (actual.length > MAX_MATCH_INPUT_LENGTH) return false;
-      return regex(expected)?.test(actual) ?? false;
+      if (typeof actual !== "string" || typeof expected !== "string" || actual.length > MAX_MATCH_INPUT_LENGTH) return false;
+      return compilePattern(expected)?.test(actual) ?? false;
     }
     case "lessThan":
     case "lessThanOrEqual":
