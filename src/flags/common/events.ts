@@ -176,10 +176,18 @@ export class EventProcessor {
     if (this.disabled) return;
     const events = this.drain();
     if (!events.length) return;
-    const body = JSON.stringify(events);
-    const nav = (globalThis as { navigator?: { sendBeacon?: (u: string, d: string) => boolean } }).navigator;
-    if (this.opts.beacon && nav?.sendBeacon && document?.visibilityState === "hidden") {
-      if (nav.sendBeacon(this.opts.url, body)) return;
+    for (const body of chunkEvents(events, this.logger)) {
+      if (this.disabled) return;
+      await this.send(body);
+    }
+  }
+
+  private async send(body: string) {
+    const bytes = byteLength(body);
+    const g = globalThis as { navigator?: { sendBeacon?: (u: string, d: string) => boolean }; document?: { visibilityState?: string } };
+    // Beacons and keepalive requests share a 64 KiB in-flight budget in browsers; bigger bodies fail outright.
+    if (this.opts.beacon && g.navigator?.sendBeacon && g.document?.visibilityState === "hidden" && bytes < KEEPALIVE_MAX_BYTES) {
+      if (g.navigator.sendBeacon(this.opts.url, body)) return;
     }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -187,7 +195,7 @@ export class EventProcessor {
           method: "POST",
           headers: { "content-type": "application/json", ...this.opts.headers },
           body,
-          keepalive: body.length < 60_000,
+          keepalive: bytes < KEEPALIVE_MAX_BYTES,
         });
         if (res.ok) return;
         if (res.status === 401 || res.status === 403) {
@@ -198,7 +206,7 @@ export class EventProcessor {
       } catch (err) {
         if (attempt === 1) this.logger.warn("Failed to send events", err);
       }
-      await new Promise((r) => setTimeout(r, 1000));
+      if (attempt === 0) await new Promise((r) => unrefTimer(setTimeout(r, 1000)));
     }
   }
 
@@ -208,4 +216,41 @@ export class EventProcessor {
   }
 }
 
-declare const document: { visibilityState?: string } | undefined;
+/** DevPulse accepts at most this many events per POST (the rest are silently dropped). */
+export const MAX_EVENTS_PER_REQUEST = 5000;
+/** Browser event bodies are capped at 512 KB by DevPulse; stay under it with room for brackets. */
+export const MAX_REQUEST_BYTES = 500_000;
+/** keepalive / sendBeacon bodies must fit in the browser's 64 KiB in-flight budget. */
+export const KEEPALIVE_MAX_BYTES = 60_000;
+
+const encoder = new TextEncoder();
+const byteLength = (s: string) => encoder.encode(s).length;
+
+function unrefTimer(t: ReturnType<typeof setTimeout>) {
+  (t as { unref?: () => void }).unref?.();
+  return t;
+}
+
+/** Split events into JSON array bodies of at most MAX_EVENTS_PER_REQUEST events and MAX_REQUEST_BYTES bytes. */
+export function chunkEvents(events: Record<string, unknown>[], logger: Logger = noopLogger, maxBytes = MAX_REQUEST_BYTES, maxEvents = MAX_EVENTS_PER_REQUEST): string[] {
+  const bodies: string[] = [];
+  let parts: string[] = [];
+  let size = 2; // "[" + "]"
+  for (const e of events) {
+    const json = JSON.stringify(e);
+    const n = byteLength(json);
+    if (n + 2 > maxBytes) {
+      logger.warn(`Dropping a ${String(e.kind)} event of ${n} bytes (over the ${maxBytes}-byte request limit)`);
+      continue;
+    }
+    if (parts.length && (parts.length >= maxEvents || size + n + 1 > maxBytes)) {
+      bodies.push(`[${parts.join(",")}]`);
+      parts = [];
+      size = 2;
+    }
+    size += n + (parts.length ? 1 : 0);
+    parts.push(json);
+  }
+  if (parts.length) bodies.push(`[${parts.join(",")}]`);
+  return bodies;
+}

@@ -1,8 +1,9 @@
 import type { ContextInput, EvaluationReason, FlagValue } from "./engine/index.js";
-import { EventProcessor, SseClient, encodeContext, noopLogger, type Logger } from "./common/index.js";
+import { EventProcessor, SDK_VERSION, SseClient, encodeContext, noopLogger, type Logger } from "./common/index.js";
 import { assertSecureUrl } from "../config.js";
 
 export type { ContextInput, EvaluationReason, FlagValue, Logger };
+export { SDK_VERSION };
 
 export interface FlagState {
   value: FlagValue;
@@ -20,7 +21,13 @@ export interface ClientOptions {
   baseUrl: string;
   /** Receive changes in real time over Server-Sent Events (default true). */
   streaming?: boolean;
-  /** Initial flag values, e.g. from the Node SDK's allFlagsState() for SSR. */
+  /**
+   * Never touch the network: serve `bootstrap` (or defaults), send no events, open no stream.
+   * identify() only switches the context. Used for server-side rendering; handy in tests.
+   * The client is ready immediately when `bootstrap` is given.
+   */
+  offline?: boolean;
+  /** Initial flag values, e.g. from the Node SDK's allFlagsState().toJSON() for SSR. */
   bootstrap?: FlagSet | Record<string, FlagValue>;
   /** Secure mode hash for the context (HMAC-SHA256 computed on your server). */
   hash?: string;
@@ -73,6 +80,10 @@ export class DevPulseClient {
   private rejectReady!: (e: Error) => void;
   private initialized = false;
   private closed = false;
+  /** Bumped by identify(); responses for an older context are ignored. */
+  private contextSeq = 0;
+  private stale = false;
+  private detachVisibility: (() => void) | null = null;
   private readonly logger: Logger;
   private readonly base: string;
 
@@ -100,6 +111,8 @@ export class DevPulseClient {
       if (cached) this.flags = flagMap(cached);
     }
 
+    if (options.offline) return;
+
     if (options.sendEvents !== false && typeof globalThis.fetch === "function") {
       this.events = new EventProcessor({
         url: `${this.base}/sdk/v1/events/client/${encodeURIComponent(clientSideId)}`,
@@ -111,10 +124,15 @@ export class DevPulseClient {
         logger: this.logger,
       });
       this.events.identify(context);
-      const doc = (globalThis as { document?: { addEventListener: (t: string, f: () => void) => void; visibilityState?: string } }).document;
-      doc?.addEventListener("visibilitychange", () => {
-        if (doc.visibilityState === "hidden") void this.events?.flush();
-      });
+      type Doc = { addEventListener: (t: string, f: () => void) => void; removeEventListener: (t: string, f: () => void) => void; visibilityState?: string };
+      const doc = (globalThis as { document?: Doc }).document;
+      if (doc?.addEventListener) {
+        const onVisibility = () => {
+          if (doc.visibilityState === "hidden") void this.events?.flush();
+        };
+        doc.addEventListener("visibilitychange", onVisibility);
+        this.detachVisibility = () => doc.removeEventListener("visibilitychange", onVisibility);
+      }
     }
 
     void this.start();
@@ -130,9 +148,9 @@ export class DevPulseClient {
   private async start() {
     if (this.options.streaming === false) {
       try {
-        this.replaceAll(await this.fetchFlags());
+        await this.loadFlags();
       } catch (err) {
-        this.fail(err as Error);
+        if (!this.closed) this.fail(err as Error);
       }
       return;
     }
@@ -140,7 +158,10 @@ export class DevPulseClient {
       url: () => `${this.base}/sdk/v1/client/${encodeURIComponent(this.clientSideId)}/stream?${this.query()}`,
       fetch: this.options.fetch,
       onEvent: (ev) => this.onStreamEvent(ev.type, ev.data),
-      onOpen: () => this.logger.debug("DevPulse stream connected"),
+      onOpen: () => {
+        this.logger.debug("DevPulse stream connected");
+        this.setStale(false);
+      },
       onError: (err) => {
         this.logger.warn(`DevPulse stream error: ${err.message}`);
         if (!err.recoverable) {
@@ -148,11 +169,21 @@ export class DevPulseClient {
           return false;
         }
         // Keep serving flags while reconnecting; fetch once so a first load still succeeds.
-        if (!this.initialized) this.fetchFlags().then((f) => this.replaceAll(f), () => undefined);
+        this.setStale(true, err);
+        if (!this.initialized) this.loadFlags().catch(() => undefined);
         return true;
       },
     });
     this.stream.start();
+  }
+
+  /** Fetch flags for the current context and apply them unless identify() moved on (or close()) meanwhile. */
+  private async loadFlags(): Promise<boolean> {
+    const seq = this.contextSeq;
+    const flags = await this.fetchFlags();
+    if (seq !== this.contextSeq || this.closed) return false;
+    this.replaceAll(flags);
+    return true;
   }
 
   private async fetchFlags(): Promise<FlagSet> {
@@ -209,6 +240,14 @@ export class DevPulseClient {
     this.emit("ready");
   }
 
+  /** "stale" when the stream drops after loading (flags keep serving), "recovered" once it reconnects. */
+  private setStale(stale: boolean, err?: Error) {
+    if (!this.initialized || this.closed || this.stale === stale) return;
+    this.stale = stale;
+    if (stale) this.emit("stale", err);
+    else this.emit("recovered");
+  }
+
   private fail(err: Error) {
     if (!this.initialized) this.rejectReady(err);
     this.emit("failed", err);
@@ -255,11 +294,23 @@ export class DevPulseClient {
     return this.initialized;
   }
 
+  /** True after close(); a closed client never updates again. */
+  get isClosed() {
+    return this.closed;
+  }
+
   variation<T extends FlagValue>(key: string, defaultValue: T): T {
     return this.variationDetail(key, defaultValue).value;
   }
 
   variationDetail<T extends FlagValue>(key: string, defaultValue: T): EvaluationDetail<T> {
+    const detail = this.peekVariationDetail(key, defaultValue);
+    this.recordEvaluation(key, defaultValue, detail);
+    return detail;
+  }
+
+  /** @internal Evaluate without recording an analytics event (React hooks record from an effect). */
+  peekVariationDetail<T extends FlagValue>(key: string, defaultValue: T): EvaluationDetail<T> {
     const f = this.flag(key);
     let detail: EvaluationDetail<T>;
     if (!f) detail = { value: defaultValue, variationIndex: null, reason: { kind: "ERROR", errorKind: this.initialized ? "FLAG_NOT_FOUND" : "CLIENT_NOT_READY" } };
@@ -267,8 +318,13 @@ export class DevPulseClient {
     else if (f.value === null) detail = { value: defaultValue, variationIndex: f.variation, reason: f.reason ?? null };
     else if (defaultValue !== null && typeof defaultValue !== typeof f.value) detail = { value: defaultValue, variationIndex: null, reason: { kind: "ERROR", errorKind: "WRONG_TYPE" } };
     else detail = { value: f.value as T, variationIndex: f.variation, reason: f.reason ?? null };
-    this.events?.recordEvaluation({ key, context: this.context, value: detail.value, default: defaultValue, variation: detail.variationIndex, version: f?.version, reason: f?.reason, trackEvents: f?.trackEvents });
     return detail;
+  }
+
+  /** @internal Record the analytics event for an evaluation made with peekVariationDetail(). */
+  recordEvaluation<T extends FlagValue>(key: string, defaultValue: T, detail: EvaluationDetail<T>) {
+    const f = this.flag(key);
+    this.events?.recordEvaluation({ key, context: this.context, value: detail.value, default: defaultValue, variation: detail.variationIndex, version: f?.version, reason: f?.reason, trackEvents: f?.trackEvents });
   }
 
   boolVariation(key: string, defaultValue: boolean) {
@@ -289,13 +345,19 @@ export class DevPulseClient {
     return Object.fromEntries(Object.entries(this.flags).map(([k, v]) => [k, v.value]));
   }
 
-  /** Switch to a different context (e.g. after login). Resolves with the new flags. */
+  /**
+   * Switch to a different context (e.g. after login). Resolves with the new flags. When calls
+   * overlap, the last one wins: an earlier call's late response is ignored.
+   */
   async identify(context: ContextInput, opts: { hash?: string } = {}): Promise<Record<string, FlagValue>> {
+    this.contextSeq++;
     this.context = context;
     if (opts.hash !== undefined) this.options.hash = opts.hash;
+    if (this.options.offline || this.closed) return this.allFlags();
     this.events?.identify(context);
-    this.replaceAll(await this.fetchFlags());
+    // Drop the old context's stream now, so none of its events land after the switch.
     this.stream?.restart();
+    await this.loadFlags();
     return this.allFlags();
   }
 
@@ -308,7 +370,11 @@ export class DevPulseClient {
     this.events?.track(key, this.context, data, metricValue);
   }
 
-  on(event: "ready" | "failed" | "change" | `change:${string}`, fn: Listener) {
+  /**
+   * Events: "ready", "failed" (fatal, e.g. an invalid client-side ID), "change" / "change:<key>",
+   * "stale" (stream lost; the last flags keep serving) and "recovered".
+   */
+  on(event: "ready" | "failed" | "change" | "stale" | "recovered" | `change:${string}`, fn: Listener) {
     let set = this.listeners.get(event);
     if (!set) this.listeners.set(event, (set = new Set()));
     set.add(fn);
@@ -336,6 +402,8 @@ export class DevPulseClient {
   async close() {
     if (this.closed) return;
     this.closed = true;
+    this.detachVisibility?.();
+    this.detachVisibility = null;
     this.stream?.stop();
     await this.events?.close();
     this.listeners.clear();

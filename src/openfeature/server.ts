@@ -15,10 +15,20 @@ export class DevPulseServerProvider implements Provider {
   readonly runsOn = "server" as const;
   readonly events = new OpenFeatureEventEmitter();
   readonly client: DevPulseNodeClient;
+  /** Only a client this provider created is closed by onClose(); an injected one belongs to the caller. */
+  private readonly ownsClient: boolean;
+  private readonly detach: () => void;
 
   constructor(sdkKeyOrClient: string | DevPulseNodeClient, options?: NodeClientOptions) {
+    this.ownsClient = typeof sdkKeyOrClient === "string";
     this.client = typeof sdkKeyOrClient === "string" ? init(sdkKeyOrClient, options!) : sdkKeyOrClient;
-    this.client.on("update", ({ key }: { key: string }) => this.events.emit(ProviderEvents.ConfigurationChanged, { flagsChanged: [key] }));
+    const onUpdate = ({ key }: { key: string }) => this.events.emit(ProviderEvents.ConfigurationChanged, { flagsChanged: [key] });
+    // Before initialization a failure rejects initialize() instead, which OpenFeature reports itself.
+    const onFailed = (err?: Error) => this.client.isInitialized && this.events.emit(ProviderEvents.Error, { message: err?.message ?? "DevPulse client failed" });
+    const onStale = (err?: Error) => this.events.emit(ProviderEvents.Stale, { message: err?.message ?? "DevPulse connection lost; serving last known flags" });
+    const onRecovered = () => this.events.emit(ProviderEvents.Ready);
+    this.client.on("update", onUpdate).on("failed", onFailed).on("stale", onStale).on("recovered", onRecovered);
+    this.detach = () => void this.client.off("update", onUpdate).off("failed", onFailed).off("stale", onStale).off("recovered", onRecovered);
   }
 
   async initialize(): Promise<void> {
@@ -26,7 +36,8 @@ export class DevPulseServerProvider implements Provider {
   }
 
   async onClose(): Promise<void> {
-    await this.client.close();
+    this.detach();
+    if (this.ownsClient) await this.client.close();
   }
 
   private resolve<T>(key: string, def: T, ctx: EvaluationContext, type: string): ResolutionDetails<T> {
