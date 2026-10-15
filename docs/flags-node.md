@@ -46,4 +46,4 @@ See `@shelbyb/daywalker-sdk/flags/react` for the `Providers` component.
 
 ## API
 
-`variation` / `variationDetail` (async) and `variationSync` / `variationDetailSync`, typed helpers (`boolVariation`, …), `allFlagsState(context, { clientSideOnly, withReasons })`, `secureModeHash(context)`, `track`, `identify`, `on("ready" | "failed" | "update" | "update:<key>")`, `flush()`, `close()`.
+`variation` / `variationDetail` (async) and `variationSync` / `variationDetailSync`, typed helpers (`boolVariation`, …), `allFlagsState(context, { clientSideOnly, withReasons })` (`clientSideOnly` defaults to `true`, so server-only flags never reach a browser bootstrap), `secureModeHash(context)`, `track`, `identify`, `on("ready" | "failed" | "update" | "update:<key>" | "stale" | "recovered")`, `flush()`, `close()`.
