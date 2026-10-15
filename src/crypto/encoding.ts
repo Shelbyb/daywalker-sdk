@@ -55,6 +55,21 @@ export function base64UrlToBytes(b64url: string): Uint8Array {
   return base64ToBytes(b64);
 }
 
+/**
+ * Decodes unpadded base64url (RFC 7515 §2) strictly: only `[A-Za-z0-9_-]` and only the canonical encoding
+ * of the bytes, so a token or signature has exactly one accepted spelling. Throws otherwise.
+ */
+export function base64UrlToBytesStrict(b64url: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]*$/.test(b64url) || b64url.length % 4 === 1) {
+    throw new Error("Invalid base64url encoding");
+  }
+  const bytes = base64UrlToBytes(b64url);
+  if (bytesToBase64Url(bytes) !== b64url) {
+    throw new Error("Non-canonical base64url encoding");
+  }
+  return bytes;
+}
+
 export function bytesToHex(bytes: Uint8Array): string {
   let hex = "";
   for (let i = 0; i < bytes.length; i++) {
