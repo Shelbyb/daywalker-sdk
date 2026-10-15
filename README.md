@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/logo-512.png" alt="Daywalker" width="160" />
+  <img src="https://raw.githubusercontent.com/Shelbyb/daywalker-sdk/main/assets/logo-512.png" alt="Daywalker" width="160" />
 </p>
 
 # @shelbyb/daywalker-sdk
