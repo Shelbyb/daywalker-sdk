@@ -2,12 +2,19 @@ export {
   Daywalker,
   createDaywalker,
   daywalker,
+  MAX_RETRY_AFTER_MS,
+  MAX_VALIDATION_CACHE_ENTRIES,
+} from "./client.js";
+
+export type {
+  DaywalkerFetchInit,
 } from "./client.js";
 
 export {
   DaywalkerError,
   DaywalkerAuthError,
   DaywalkerRateLimitError,
+  UNAVAILABLE_ERROR_CODES,
 } from "./types.js";
 
 export type {
@@ -19,6 +26,7 @@ export type {
   RetryOptions,
   SelfCheckResult,
   PublicJwk,
+  PublicJwks,
   SigningKey,
 } from "./types.js";
 
@@ -26,6 +34,7 @@ export {
   resolveConfig,
   publicHostname,
   assertSecureUrl,
+  DEFAULT_TIMEOUT_MS,
 } from "./config.js";
 
 export type {
@@ -37,6 +46,8 @@ export {
   SIGNATURE_LABEL,
   SIGNATURE_ALG,
   MAX_CLOCK_SKEW_SECONDS,
+  REPLAY_CACHE_MAX_ENTRIES,
+  SignatureReplayCache,
   computeContentDigest,
   sha256Base64,
   sha256Base64Url,
@@ -56,6 +67,7 @@ export {
   base64ToBytes,
   bytesToBase64Url,
   base64UrlToBytes,
+  base64UrlToBytesStrict,
   bytesToHex,
   hexToBytes,
   maskSecret,
@@ -67,4 +79,5 @@ export type {
   SignRequestParams,
   VerifySignatureParams,
   VerifySignatureResult,
+  ReplayStore,
 } from "./crypto/index.js";

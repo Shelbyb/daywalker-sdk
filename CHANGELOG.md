@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.0
+Security and reliability fixes from an audit of the whole package. Several are **breaking**; read those before upgrading from 0.3.
+
+**Package**
+- **Breaking:** Node.js 20.19+ (was documented as 18+). `require()` of the package works on Node 20.19+ / 22.12+ via the new `default` export conditions.
+- **Breaking:** one runtime dependency, [`re2js`](https://www.npmjs.com/package/re2js): flag `matches` rules run on RE2 (linear time), so no pattern can hang evaluation. The 0.3 nested-quantifier heuristic is gone; patterns RE2 can't compile (backreferences, lookarounds) never match.
+- The publish workflow builds in a job without `id-token: write`; only the job that runs `npm publish` gets the OIDC token. CI checks the packed tarball with publint and attw.
+
+**Core client and signing**
+- **Breaking:** validation fails closed. A network error, timeout or 5xx from Daywalker returns `SERVICE_UNAVAILABLE` (503) instead of anything that could be read as valid, and malformed validation responses are rejected.
+- **Breaking:** requests time out after 5s per attempt (`timeoutMs`; 0 disables). Network errors and timeouts are retried only for GET/HEAD/OPTIONS or with an `idempotencyKey`. `Retry-After` is honored up to 60s (`retry.maxRetryAfterMs`); a longer one returns the 429.
+- **Breaking:** redirects are never followed with credentials; a 3xx from Daywalker is an error.
+- **Breaking (signatures):** the query string is covered as `"@query"`, so it can't be changed in transit. `"content-digest"` is covered for POST/PUT/PATCH and any request with a body, and verification requires it then. Verification builds the base from the components listed in `Signature-Input`. Bodyless GET/HEAD/DELETE/OPTIONS requests no longer get a digest of an empty body. Test vectors include a `query-get` case.
+- **Breaking (leases):** JWTs with a `crit` header, non-canonical base64url or a `kid` missing from a JWKS are rejected. `daywalkerPublicKey` accepts a JWKS and selects the key by `kid`.
+- The replay cache fails closed when full instead of evicting live entries, and takes a pluggable `replayStore` for multi-instance deployments.
+- `client.keys()` also publishes `DAYWALKER_SIGNING_KEY_PREVIOUS` during rotation. Cached results are cloned, so callers can't mutate the cache.
+
+**Middleware (`./next`, `./middleware`, `./express`)**
+- **Breaking:** paths are decoded and normalized before the bypass check (`/_next/static/../admin`, `%2e%2e`, `//`, encoded slashes). Static file extensions no longer skip auth; exclude public files with Next's `matcher`, or set `staticFileExtensions` (e.g. `STATIC_FILE_EXTENSIONS`).
+- **Breaking:** error redirects carry no `message` parameter (only a fixed `error` code and `status`). The `from` return path is dropped when it could point off-site (tabs, backslashes, `//host`). With `allowedHosts`, a request without a `Host` header is refused too.
+- Daywalker outages answer `503` and configuration errors `500`, instead of `401`.
+- `createDaywalkerProxy` / `createDaywalkerServiceHealthProxy` aliases for Next.js 16 `proxy.ts`.
+
+**CLI**
+- **Breaking:** `init` and `rotate` write `.env.local` only after registration succeeds and exit non-zero otherwise; `--skip-register` writes without registering. Writes are atomic with mode `0600`.
+- `--api-key-stdin` reads the key from stdin. `init --force` keeps the replaced key as `DAYWALKER_SIGNING_KEY_PREVIOUS`. `--json` warns on stderr that its output contains the private key.
+
+**Flags, OpenFeature, analytics**
+- **Breaking:** `allFlagsState()` defaults to `clientSideOnly: true`, so server-only flags don't end up in a browser bootstrap by accident.
+- Browser SSE no longer sends headers that force a CORS preflight; each connection gets a fresh parser; `restart()` no longer leaks a timer; a server `retry:` below 1s is raised to 1s; events over 1MB are refused.
+- `identify()` ignores responses that arrive out of order. New `offline` option. New `stale` / `recovered` events when the stream drops and comes back.
+- React: the client is created in an effect (StrictMode-safe), never opens a connection during server rendering, and records evaluations after commit.
+- Events and analytics batches are split under the 64KB `keepalive` and body limits. Opting out of analytics drops queued events. New `sanitizePath` option.
+- OpenFeature: `Date` context values are serialized as ISO strings; providers emit ERROR / STALE / READY; a client you pass in is not closed by the provider.
+- Shared evaluation test vectors: [`test-vectors/flags-eval.json`](./test-vectors/flags-eval.json).
+
 ## 0.3.0
 Security fixes. Released as a minor version (not 0.2.1) because several changes are breaking: `^0.2.x` ranges won't pick it up automatically. Items marked **breaking** change behavior existing code may rely on.
 

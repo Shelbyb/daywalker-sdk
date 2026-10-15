@@ -1,4 +1,4 @@
-import type { PublicJwk, SigningKey } from "../types.js";
+import type { PublicJwk, PublicJwks, SigningKey } from "../types.js";
 import {
   base64ToBytes,
   base64UrlToBytes,
@@ -191,11 +191,30 @@ export async function loadSigningKey(raw: string | SigningKey): Promise<SigningK
 }
 
 /**
- * Load an Ed25519 public key from JWK, PEM, Base64 SPKI, or Base64url raw public key.
+ * Picks the Ed25519 key with this `kid` from a JWKS, or its only Ed25519 key (the signature check still
+ * has to pass against it). Several keys and no matching `kid` is an error rather than a guess.
+ */
+function selectJwk(jwks: { keys?: unknown }, kid?: string): PublicJwk {
+  const keys = (Array.isArray(jwks.keys) ? jwks.keys : []).filter(
+    (k): k is PublicJwk => !!k && typeof k === "object" && (k as PublicJwk).kty === "OKP" && (k as PublicJwk).crv === "Ed25519"
+  );
+  const byKid = kid ? keys.find((k) => k.kid === kid) : undefined;
+  if (byKid) return byKid;
+  if (keys.length === 1) return keys[0];
+  if (keys.length === 0) throw new Error("JWKS contains no Ed25519 keys");
+  throw new Error(kid ? `No key in JWKS matches kid "${kid}"` : "JWKS has several keys and the signature names no kid");
+}
+
+/**
+ * Load an Ed25519 public key from JWK, JWKS (selected by `kid`), PEM, Base64 SPKI, or Base64url raw public key.
  */
 export async function loadPublicKey(
-  raw: string | PublicJwk | CryptoKey
+  raw: string | PublicJwk | PublicJwks | CryptoKey,
+  kid?: string
 ): Promise<{ publicKey: CryptoKey; publicJwk: PublicJwk }> {
+  if (typeof raw === "object" && raw && "keys" in raw) {
+    return loadPublicKey(selectJwk(raw, kid));
+  }
   if (typeof raw === "object" && "type" in raw && raw.type === "public") {
     const exported = (await globalThis.crypto.subtle.exportKey("jwk", raw as CryptoKey)) as {
       x: string;
@@ -245,14 +264,17 @@ export async function loadPublicKey(
 
   // Try parsing as JSON JWK or JWKS
   if (trimmed.startsWith("{")) {
+    let parsed: any;
     try {
-      const parsed = JSON.parse(trimmed);
-      const jwkCandidate = parsed.keys ? parsed.keys[0] : parsed;
-      if (jwkCandidate && jwkCandidate.kty === "OKP" && jwkCandidate.crv === "Ed25519") {
-        return loadPublicKey(jwkCandidate);
-      }
+      parsed = JSON.parse(trimmed);
     } catch {
       // Continue
+    }
+    if (parsed && typeof parsed === "object") {
+      const jwkCandidate = parsed.keys ? selectJwk(parsed, kid) : parsed;
+      if (jwkCandidate.kty === "OKP" && jwkCandidate.crv === "Ed25519") {
+        return loadPublicKey(jwkCandidate);
+      }
     }
   }
 

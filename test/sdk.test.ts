@@ -71,6 +71,8 @@ describe("RFC 9421 / RFC 9530 WebCrypto signing protocol", () => {
       assert.strictEqual(headers["Content-Digest"], v.contentDigest);
       assert.strictEqual(headers["Signature-Input"], `${SIGNATURE_LABEL}=${v.signatureParams}`);
       assert.match(headers["Signature"], new RegExp(`^${SIGNATURE_LABEL}=:[A-Za-z0-9+/=_-]+:$`));
+      // Ed25519 is deterministic, so the server must reproduce exactly this signature.
+      assert.strictEqual(headers["Signature"], v.signature);
       assert.strictEqual(headers["Authorization"], "Bearer srv_live_test_token");
 
       // Verify signature with public JWK

@@ -1,21 +1,28 @@
-import type { DaywalkerConfig, PublicJwk, SigningKey } from "./types.js";
+import type { DaywalkerConfig, PublicJwk, PublicJwks, RetryOptions, SigningKey } from "./types.js";
 
 export interface ResolvedConfig {
   apiKey: string | null;
   signingKey: string | SigningKey | null;
+  /** Never signs; `keys()` publishes its public JWK alongside the current key during rotation. */
   previousSigningKey: string | SigningKey | null;
   keyId: string | null;
   serviceSlug: string | null;
   domain: string | null;
   domainSource: string | null;
-  daywalkerPublicKey: string | PublicJwk | null;
+  daywalkerPublicKey: string | PublicJwk | PublicJwks | null;
   leaseIssuer: string | null;
   authUrl: string;
   cacheTtlMs: number;
   negativeCacheTtlMs: number;
   maxRetries: number;
+  /** `config.retry` with undefined fields dropped; per-request `init.retry` is layered on top. */
+  retry: RetryOptions;
+  timeoutMs: number;
   problems: string[];
 }
+
+/** Default per-attempt timeout for requests to Daywalker Auth. */
+export const DEFAULT_TIMEOUT_MS = 5_000;
 
 const URL_ENV_VARS = [
   "APP_URL",
@@ -122,6 +129,15 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const cacheTtlMs = options.cacheTtlMs ?? 60_000;
   const negativeCacheTtlMs = options.negativeCacheTtlMs ?? 3_000;
   const maxRetries = options.maxRetries ?? (options.retry?.maxRetries ?? 3);
+  const retry: RetryOptions = {};
+  for (const [k, v] of Object.entries(options.retry ?? {})) {
+    if (v !== undefined) (retry as Record<string, unknown>)[k] = v;
+  }
+  retry.maxRetries = maxRetries;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error(`timeoutMs must be a non-negative number of milliseconds (got ${timeoutMs})`);
+  }
 
   return {
     apiKey,
@@ -137,6 +153,8 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     cacheTtlMs,
     negativeCacheTtlMs,
     maxRetries,
+    retry,
+    timeoutMs,
     problems,
   };
 }

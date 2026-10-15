@@ -1,10 +1,12 @@
 import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Evaluator, MemoryStore, evaluateFlag, parseContext, type ContextInput, type EvaluationDetail, type FlagConfig, type FlagValue, type SegmentConfig } from "./engine/index.js";
-import { EventProcessor, SseClient, noopLogger, type Logger } from "./common/index.js";
+import { EventProcessor, SDK_VERSION, SseClient, noopLogger, type Logger } from "./common/index.js";
+import type { FlagSet } from "./client.js";
 import { assertSecureUrl } from "../config.js";
 
-export type { ContextInput, EvaluationDetail, FlagValue, Logger };
+export type { ContextInput, EvaluationDetail, FlagSet, FlagValue, Logger };
+export { SDK_VERSION };
 
 export interface NodeClientOptions {
   /** Base URL of your DevPulse deployment (https required except on localhost). */
@@ -30,12 +32,25 @@ type ServerFlag = FlagConfig & { clientSide?: boolean; mobile?: boolean };
 export interface AllFlagsState {
   valid: boolean;
   values: Record<string, FlagValue>;
-  /** Pass to the browser SDK's `bootstrap` option for flicker-free SSR. */
-  toJSON(): Record<string, { value: FlagValue; variation: number | null; version: number; reason?: unknown }>;
+  /** Pass to the browser SDK's `bootstrap` option for flicker-free SSR (same shape as the client endpoint). */
+  toJSON(): FlagSet;
+}
+
+export interface AllFlagsStateOptions {
+  /**
+   * Only flags marked "available to client-side SDKs" (default true), so the result is safe to
+   * embed in HTML. Pass false to include every flag, e.g. for server-side use only.
+   */
+  clientSideOnly?: boolean;
+  /** Include evaluation reasons (always included for experiments). */
+  withReasons?: boolean;
 }
 
 /**
  * Server-side client. One instance per process and SDK key.
+ *
+ * Events: "ready", "failed" (fatal, e.g. an invalid SDK key), "update" / "update:<key>",
+ * "stale" (connection lost; the last data keeps serving) and "recovered".
  *
  *   const client = init(process.env.DEVPULSE_SDK_KEY!, { baseUrl });
  *   await client.waitForInitialization({ timeoutMs: 5000 });
@@ -52,6 +67,7 @@ export class DevPulseNodeClient extends EventEmitter {
   private resolveReady!: () => void;
   private rejectReady!: (e: Error) => void;
   private streamFailures = 0;
+  private stale = false;
   private readonly logger: Logger;
   private readonly base: string;
 
@@ -91,7 +107,7 @@ export class DevPulseNodeClient extends EventEmitter {
   }
 
   private headers() {
-    return { authorization: this.sdkKey, "user-agent": "DevPulseNode/0.1.0" };
+    return { authorization: this.sdkKey, "user-agent": `DevPulseNode/${SDK_VERSION}` };
   }
 
   private startStreaming() {
@@ -99,9 +115,13 @@ export class DevPulseNodeClient extends EventEmitter {
       url: `${this.base}/sdk/v1/server/stream`,
       headers: () => this.headers(),
       fetch: this.options.fetch,
+      browser: false,
+      // Full rulesets (segments with big target lists) can be large.
+      maxEventSize: 64 * 1024 * 1024,
       onOpen: () => {
         this.streamFailures = 0;
         this.stopPolling();
+        this.setStale(false);
       },
       onEvent: (ev) => this.onStreamEvent(ev.type, ev.data),
       onError: (err) => {
@@ -110,6 +130,8 @@ export class DevPulseNodeClient extends EventEmitter {
           this.fail(new Error("Invalid SDK key"));
           return false;
         }
+        // While polling, the poll result decides whether data is stale.
+        if (!this.poller) this.setStale(true, err);
         // After repeated failures, poll so data stays fresh while we keep retrying the stream.
         if (++this.streamFailures >= 3) this.startPolling();
         return true;
@@ -124,13 +146,18 @@ export class DevPulseNodeClient extends EventEmitter {
     const poll = async () => {
       try {
         const res = await (this.options.fetch ?? fetch)(`${this.base}/sdk/v1/server/flags`, { headers: { ...this.headers(), ...(this.etag ? { "if-none-match": this.etag } : {}) } });
-        if (res.status === 304) return this.markReady();
+        if (res.status === 304) {
+          this.setStale(false);
+          return this.markReady();
+        }
         if (res.status === 401 || res.status === 403) return this.fail(new Error("Invalid SDK key"));
         if (!res.ok) throw new Error(`Poll failed with ${res.status}`);
         this.etag = res.headers.get("etag");
         this.applyPut((await res.json()) as { flags: Record<string, ServerFlag>; segments: Record<string, SegmentConfig> });
+        this.setStale(false);
       } catch (err) {
         this.logger.warn("DevPulse poll failed", err);
+        this.setStale(true, err as Error);
       }
     };
     this.poller = setInterval(poll, interval);
@@ -181,6 +208,14 @@ export class DevPulseNodeClient extends EventEmitter {
     this.emit("ready");
   }
 
+  /** "stale" when updates stop arriving (flags keep serving the last data), "recovered" when they resume. */
+  private setStale(stale: boolean, err?: Error) {
+    if (!this.initialized || this.stale === stale) return;
+    this.stale = stale;
+    if (stale) this.emit("stale", err);
+    else this.emit("recovered");
+  }
+
   private fail(err: Error) {
     if (!this.initialized) this.rejectReady(err);
     this.emit("failed", err);
@@ -191,7 +226,12 @@ export class DevPulseNodeClient extends EventEmitter {
   waitForInitialization(opts: { timeoutMs?: number } = {}): Promise<this> {
     const ready = this.ready.then(() => this);
     if (!opts.timeoutMs) return ready;
-    return Promise.race([ready, new Promise<this>((_, rej) => setTimeout(() => rej(new Error("DevPulse initialization timed out")), opts.timeoutMs).unref?.())]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<this>((_, rej) => {
+      // Not unref'd: someone is awaiting it. Cleared as soon as either side settles.
+      timer = setTimeout(() => rej(new Error("DevPulse initialization timed out")), opts.timeoutMs);
+    });
+    return Promise.race([ready, timeout]).finally(() => clearTimeout(timer));
   }
 
   get isInitialized(): boolean {
@@ -240,10 +280,14 @@ export class DevPulseNodeClient extends EventEmitter {
   }
 
   /**
-   * Evaluate every flag for a context, e.g. to bootstrap a browser client
+   * Evaluate every client-side flag for a context, e.g. to bootstrap a browser client
    * during server rendering. Doesn't record analytics.
+   *
+   *   const state = await client.allFlagsState(context);
+   *   createClient(id, context, { baseUrl, bootstrap: state.toJSON() });
    */
-  async allFlagsState(context: ContextInput, opts: { clientSideOnly?: boolean; withReasons?: boolean } = {}): Promise<AllFlagsState> {
+  async allFlagsState(context: ContextInput, opts: AllFlagsStateOptions = {}): Promise<AllFlagsState> {
+    const clientSideOnly = opts.clientSideOnly ?? true;
     let ctx;
     try {
       ctx = parseContext(context);
@@ -251,11 +295,20 @@ export class DevPulseNodeClient extends EventEmitter {
       return { valid: false, values: {}, toJSON: () => ({}) };
     }
     const evaluator = new Evaluator(this.store);
-    const state: Record<string, { value: FlagValue; variation: number | null; version: number; reason?: unknown }> = {};
+    const state: FlagSet = {};
     for (const f of this.store.flags.values() as IterableIterator<ServerFlag>) {
-      if (opts.clientSideOnly && !f.clientSide) continue;
+      if (f.deleted || (clientSideOnly && !f.clientSide)) continue;
       const { detail } = evaluator.evaluate(f, ctx);
-      state[f.key] = { value: detail.value, variation: detail.variationIndex, version: f.version, ...(opts.withReasons ? { reason: detail.reason } : {}) };
+      // Same shape as the DevPulse client endpoint, so client-side analytics and experiments keep working.
+      const inExperiment = "inExperiment" in detail.reason && !!detail.reason.inExperiment;
+      state[f.key] = {
+        value: detail.value,
+        variation: detail.variationIndex,
+        version: f.version,
+        ...(opts.withReasons || inExperiment ? { reason: detail.reason } : {}),
+        ...(f.trackEvents || inExperiment ? { trackEvents: true } : {}),
+        ...(inExperiment ? { trackReason: true } : {}),
+      };
     }
     return { valid: this.initialized, values: Object.fromEntries(Object.entries(state).map(([k, v]) => [k, v.value])), toJSON: () => state };
   }

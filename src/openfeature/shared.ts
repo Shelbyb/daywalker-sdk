@@ -5,11 +5,29 @@ type Reason = { kind: string; errorKind?: string; inExperiment?: boolean } | nul
 type Detail<T> = { value: T; variationIndex: number | null; reason: Reason };
 
 /**
- * OpenFeature context → DevPulse context. `targetingKey` becomes the key;
+ * OpenFeature context values may be Dates; DevPulse compares RFC 3339 strings (or epoch ms) for
+ * `before`/`after`, so Dates become ISO strings at any depth (invalid Dates are dropped).
+ */
+function toJsonValue(v: unknown): unknown {
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? undefined : v.toISOString();
+  if (Array.isArray(v)) return v.map(toJsonValue);
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v)) {
+      const j = toJsonValue(x);
+      if (j !== undefined) out[k] = j;
+    }
+    return out;
+  }
+  return v;
+}
+
+/**
+ * OpenFeature context → DevPulse context. Dates become ISO 8601 strings. `targetingKey` becomes the key;
  * `kind` selects the context kind (default "user"); multi-kind contexts pass through.
  */
 export function toDevPulseContext(ctx: EvaluationContext): Record<string, unknown> {
-  const { targetingKey, ...rest } = ctx as Record<string, unknown>;
+  const { targetingKey, ...rest } = toJsonValue(ctx) as Record<string, unknown>;
   if (rest.kind === "multi") return rest;
   return { ...rest, kind: typeof rest.kind === "string" ? rest.kind : "user", key: targetingKey ?? rest.key };
 }

@@ -1,6 +1,6 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics) in one zero-dependency package.",
   "type": "module",
   "main": "./dist/index.js",
@@ -8,47 +8,58 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./next": {
       "types": "./dist/next.d.ts",
-      "import": "./dist/next.js"
+      "import": "./dist/next.js",
+      "default": "./dist/next.js"
     },
     "./middleware": {
       "types": "./dist/middleware.d.ts",
-      "import": "./dist/middleware.js"
+      "import": "./dist/middleware.js",
+      "default": "./dist/middleware.js"
     },
     "./express": {
       "types": "./dist/express.d.ts",
-      "import": "./dist/express.js"
+      "import": "./dist/express.js",
+      "default": "./dist/express.js"
     },
     "./flags": {
       "types": "./dist/flags/client.d.ts",
-      "import": "./dist/flags/client.js"
+      "import": "./dist/flags/client.js",
+      "default": "./dist/flags/client.js"
     },
     "./flags/node": {
       "types": "./dist/flags/node.d.ts",
-      "import": "./dist/flags/node.js"
+      "import": "./dist/flags/node.js",
+      "default": "./dist/flags/node.js"
     },
     "./flags/react": {
       "types": "./dist/flags/react.d.ts",
-      "import": "./dist/flags/react.js"
+      "import": "./dist/flags/react.js",
+      "default": "./dist/flags/react.js"
     },
     "./flags/engine": {
       "types": "./dist/flags/engine/index.d.ts",
-      "import": "./dist/flags/engine/index.js"
+      "import": "./dist/flags/engine/index.js",
+      "default": "./dist/flags/engine/index.js"
     },
     "./openfeature/server": {
       "types": "./dist/openfeature/server.d.ts",
-      "import": "./dist/openfeature/server.js"
+      "import": "./dist/openfeature/server.js",
+      "default": "./dist/openfeature/server.js"
     },
     "./openfeature/web": {
       "types": "./dist/openfeature/web.d.ts",
-      "import": "./dist/openfeature/web.js"
+      "import": "./dist/openfeature/web.js",
+      "default": "./dist/openfeature/web.js"
     },
     "./analytics": {
       "types": "./dist/analytics/index.d.ts",
-      "import": "./dist/analytics/index.js"
+      "import": "./dist/analytics/index.js",
+      "default": "./dist/analytics/index.js"
     }
   },
   "bin": {
@@ -56,7 +67,6 @@
   },
   "files": [
     "dist",
-    "assets",
     "docs",
     "README.md",
     "LICENSE"
@@ -68,6 +78,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --import tsx --test test/*.test.ts",
+    "lint:package": "publint --strict && attw --pack . --profile esm-only",
     "prepublishOnly": "npm test"
   },
   "publishConfig": {
@@ -81,12 +92,16 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@openfeature/core": "^1.12.0",
     "@openfeature/server-sdk": "^1.23.0",
     "@openfeature/web-sdk": "^1.10.0",
     "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "publint": "^0.3.25",
     "react": "^19.3.0",
+    "react-dom": "^19.3.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
   },
@@ -121,5 +136,8 @@
       "optional": true
     }
   },
-  "sideEffects": false
+  "sideEffects": false,
+  "dependencies": {
+    "re2js": "2.8.6"
+  }
 }

@@ -1,7 +1,7 @@
-import type { PublicJwk, SigningKey, SignedHeaders, SignRequestParams, VerifySignatureParams, VerifySignatureResult } from "../types.js";
+import type { PublicJwk, PublicJwks, ReplayStore, SigningKey, SignedHeaders, SignRequestParams, VerifySignatureParams, VerifySignatureResult } from "../types.js";
 import {
   base64ToBytes,
-  base64UrlToBytes,
+  base64UrlToBytesStrict,
   bytesToBase64,
   bytesToHex,
   stringToUtf8,
@@ -19,19 +19,35 @@ export const MAX_CLOCK_SKEW_SECONDS = 300;
 export const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9_\-\.]{1,128}$/;
 
 /**
- * Normalizes HTTP request path per RFC 3986 to prevent path traversal & signature confusion.
+ * Splits a request target into its RFC 9421 "@path" value (§2.2.6; dot segments resolved and repeated
+ * slashes collapsed per RFC 3986, to prevent path traversal & signature confusion) and its "@query" value
+ * (§2.2.7; the query with its leading "?", or "?" alone when there is none). Fragments are dropped.
  */
-export function normalizePath(rawPath: string): string {
-  if (!rawPath || !rawPath.trim()) return "/";
-  let p = rawPath.trim();
-  p = p.replace(/\/+/g, "/");
+export function splitRequestTarget(rawTarget: string): { path: string; query: string } {
+  if (!rawTarget || !rawTarget.trim()) return { path: "/", query: "?" };
+  const t = rawTarget.trim().replace(/^[^?#]*/, (p) => p.replace(/\/+/g, "/"));
   try {
-    const parsed = new URL(p, "http://localhost");
-    return parsed.pathname + parsed.search;
+    const parsed = new URL(t, "http://localhost");
+    return { path: parsed.pathname, query: parsed.search || "?" };
   } catch {
-    return p.startsWith("/") ? p : `/${p}`;
+    const p = t.replace(/[?#].*$/, "");
+    return { path: p.startsWith("/") ? p : `/${p}`, query: "?" };
   }
 }
+
+/**
+ * Normalizes an HTTP request path per RFC 3986 into the "@path" component. Path only: the query string is
+ * a separate "@query" component (see `splitRequestTarget`).
+ */
+export function normalizePath(rawPath: string): string {
+  return splitRequestTarget(rawPath).path;
+}
+
+/** Methods whose requests always cover "content-digest" (of the empty body when there is none). */
+const BODY_METHODS = new Set(["POST", "PUT", "PATCH"]);
+/** Derived components this implementation can compute; header field names must be lowercase. */
+const DERIVED_COMPONENTS = new Set(["@method", "@path", "@query", "@authority"]);
+const COMPONENT_NAME_PATTERN = /^@?[a-z0-9][a-z0-9_.-]*$/;
 
 /**
  * Validates that an identifier (keyId, serviceSlug, etc.) contains only safe alphanumeric/hyphen characters.
@@ -42,14 +58,18 @@ export function assertSafeIdentifier(name: string, value: string): void {
   }
 }
 
-/** Upper bound on remembered signatures; the oldest entries are evicted past this. */
-export const REPLAY_CACHE_MAX_ENTRIES = 10_000;
+/**
+ * Upper bound on remembered signatures. Unexpired entries are never evicted: once the cache is full of them,
+ * new signatures are rejected (fail closed) until entries expire. Entries live 2 x maxClockSkewSeconds
+ * (600s by default), so the default sustains ~160 verified requests/s per process.
+ */
+export const REPLAY_CACHE_MAX_ENTRIES = 100_000;
 
 /**
  * In-memory replay cache, keyed on keyid + decoded signature bytes (so re-encodings of the
- * same signature collide). Insertion-ordered, so eviction drops the oldest entries first.
+ * same signature collide). Per process only: multi-instance deployments need a shared `ReplayStore`.
  */
-export class SignatureReplayCache {
+export class SignatureReplayCache implements ReplayStore {
   private seen = new Map<string, number>();
 
   constructor(private readonly maxEntries = REPLAY_CACHE_MAX_ENTRIES) {}
@@ -64,16 +84,21 @@ export class SignatureReplayCache {
     return expiresAt !== undefined && expiresAt > now;
   }
 
-  public record(key: string, ttlMs: number, now = Date.now()): void {
+  /**
+   * Records `key` until `now + ttlMs`. Returns false, recording nothing, when the key is already present
+   * or the cache is full of unexpired entries (a still-valid signature is never forgotten early).
+   */
+  public record(key: string, ttlMs: number, now = Date.now()): boolean {
+    if (this.has(key, now)) return false;
     this.seen.delete(key);
+    if (this.seen.size >= this.maxEntries) {
+      for (const [k, exp] of this.seen) {
+        if (exp <= now) this.seen.delete(k);
+      }
+      if (this.seen.size >= this.maxEntries) return false;
+    }
     this.seen.set(key, now + ttlMs);
-    if (this.seen.size <= this.maxEntries) return;
-    for (const [k, exp] of this.seen) {
-      if (exp <= now) this.seen.delete(k);
-    }
-    while (this.seen.size > this.maxEntries) {
-      this.seen.delete(this.seen.keys().next().value as string);
-    }
+    return true;
   }
 
   public clear(): void {
@@ -84,6 +109,7 @@ export class SignatureReplayCache {
 export const globalReplayCache = new SignatureReplayCache();
 
 export type {
+  ReplayStore,
   SignedHeaders,
   SignRequestParams,
   VerifySignatureParams,
@@ -93,6 +119,7 @@ export type {
 /**
  * Format the RFC 9421 Signature-Input parameters string.
  * Example: `("@method" "@path" "@authority" "content-digest");created=1791561600;keyid="...";alg="ed25519";nonce="..."`
+ * Every value is validated, so none can close its quoted string and inject parameters.
  */
 export function formatSignatureParams(params: {
   components?: string[];
@@ -102,16 +129,61 @@ export function formatSignatureParams(params: {
   nonce?: string;
 }): string {
   const components = params.components ?? ["@method", "@path", "@authority", "content-digest"];
+  for (const c of components) {
+    if (!COMPONENT_NAME_PATTERN.test(c) || c === "@signature-params") {
+      throw new Error(`Invalid covered component: ${JSON.stringify(c)}`);
+    }
+  }
+  if (!Number.isSafeInteger(params.created) || params.created < 0) {
+    throw new Error("Invalid created: must be a non-negative integer of unix seconds");
+  }
+  const alg = params.alg ?? SIGNATURE_ALG;
+  assertSafeIdentifier("keyid", params.keyid);
+  assertSafeIdentifier("alg", alg);
   const componentsStr = components.map((c) => `"${c}"`).join(" ");
-  let out = `(${componentsStr});created=${params.created};keyid="${params.keyid}";alg="${params.alg ?? SIGNATURE_ALG}"`;
+  let out = `(${componentsStr});created=${params.created};keyid="${params.keyid}";alg="${alg}"`;
   if (params.nonce) {
+    assertSafeIdentifier("nonce", params.nonce);
     out += `;nonce="${params.nonce}"`;
   }
   return out;
 }
 
 /**
- * Construct canonical RFC 9421 signature base string.
+ * Parses a Signature-Input member value (RFC 8941 inner list of plain quoted component names, then
+ * `;key=value` parameters with integer or string values). Returns an error string when malformed.
+ */
+function parseSignatureParams(input: string): { components: string[]; params: Record<string, string | number> } | string {
+  const listMatch = input.match(/^\(([^()]*)\)(.*)$/);
+  if (!listMatch) return "Signature-Input missing covered components list";
+  const inner = listMatch[1].trim();
+  const components: string[] = [];
+  for (const item of inner ? inner.split(/ +/) : []) {
+    const m = item.match(/^"([^"\\]*)"$/);
+    if (!m || !COMPONENT_NAME_PATTERN.test(m[1])) {
+      return `Unsupported covered component in Signature-Input: ${item}`;
+    }
+    components.push(m[1]);
+  }
+  const params: Record<string, string | number> = {};
+  const paramPattern = /;([a-z*][a-z0-9_.*-]*)=(\d{1,15}|"[^"\\]*")/y;
+  let rest = listMatch[2];
+  while (rest.length > 0) {
+    paramPattern.lastIndex = 0;
+    const m = paramPattern.exec(rest);
+    if (!m) return "Malformed Signature-Input parameters";
+    if (Object.prototype.hasOwnProperty.call(params, m[1])) return `Duplicate Signature-Input parameter: ${m[1]}`;
+    params[m[1]] = m[2].startsWith('"') ? m[2].slice(1, -1) : parseInt(m[2], 10);
+    rest = rest.slice(m[0].length);
+  }
+  return { components, params };
+}
+
+/**
+ * Construct canonical RFC 9421 signature base string from the covered components, in order. They are
+ * `components` when given, else the list declared in `signatureParams`. "@path" and "@query" come from
+ * `path` (which may carry a query string); "content-digest" from `contentDigest`; any other header field
+ * from `additionalComponents`. Throws when a covered component has no value.
  */
 export function createSignatureBase(params: {
   method: string;
@@ -120,25 +192,45 @@ export function createSignatureBase(params: {
   contentDigest?: string | null;
   signatureParams: string;
   additionalComponents?: Record<string, string>;
+  components?: string[];
 }): string {
-  const method = params.method.toUpperCase();
-  const path = normalizePath(params.path);
-  const authority = params.authority.toLowerCase();
-
-  const lines = [
-    `"@method": ${method}`,
-    `"@path": ${path}`,
-    `"@authority": ${authority}`,
-  ];
-
-  if (params.contentDigest !== undefined && params.contentDigest !== null) {
-    lines.push(`"content-digest": ${params.contentDigest}`);
+  const target = splitRequestTarget(params.path);
+  let components = params.components;
+  if (!components) {
+    const parsed = parseSignatureParams(params.signatureParams);
+    components =
+      typeof parsed !== "string"
+        ? parsed.components
+        : [
+            "@method",
+            "@path",
+            "@authority",
+            ...(params.contentDigest !== undefined && params.contentDigest !== null ? ["content-digest"] : []),
+            ...Object.keys(params.additionalComponents ?? {}),
+          ];
   }
+  const additional: Record<string, string> = {};
+  for (const [k, v] of Object.entries(params.additionalComponents ?? {})) additional[k.toLowerCase()] = v;
 
-  if (params.additionalComponents) {
-    for (const [k, v] of Object.entries(params.additionalComponents)) {
-      lines.push(`"${k.toLowerCase()}": ${v}`);
+  const lines: string[] = [];
+  for (const raw of components) {
+    const name = raw.toLowerCase();
+    let value: string | null | undefined;
+    if (name === "@method") value = params.method.toUpperCase();
+    else if (name === "@path") value = target.path;
+    else if (name === "@query") value = target.query;
+    else if (name === "@authority") value = params.authority.toLowerCase();
+    else if (name.startsWith("@")) throw new Error(`Unsupported derived component: ${name}`);
+    else if (name === "content-digest") value = params.contentDigest ?? additional[name];
+    else value = additional[name];
+    if (value === undefined || value === null) {
+      throw new Error(`Covered component ${name} has no value`);
     }
+    value = value.trim();
+    if (/[\r\n]/.test(value)) {
+      throw new Error(`Covered component ${name} contains a line break`);
+    }
+    lines.push(`"${name}": ${value}`);
   }
 
   lines.push(`"@signature-params": ${params.signatureParams}`);
@@ -147,21 +239,24 @@ export function createSignatureBase(params: {
 
 /**
  * Sign an outgoing HTTP request according to RFC 9421 + RFC 9530.
+ * Covers "@method", "@path", "@query" (only when `path` has a query string), "@authority" and
+ * "content-digest" (whenever there is a body, and always for POST / PUT / PATCH).
  */
 export async function signRequest(params: SignRequestParams): Promise<SignedHeaders> {
   const signingKey = await loadSigningKey(params.key);
   const created = params.created ?? Math.floor(Date.now() / 1000);
   const keyid = params.keyid ?? signingKey.publicJwk.kid;
   const alg = params.alg ?? SIGNATURE_ALG;
+  const method = params.method.toUpperCase();
 
-  if (keyid) {
-    assertSafeIdentifier("keyid", keyid);
+  const body = params.body ?? (BODY_METHODS.has(method) ? "" : null);
+  const contentDigest = body !== null ? await computeContentDigest(body) : null;
+
+  const components = ["@method", "@path"];
+  if (splitRequestTarget(params.path).query !== "?") {
+    components.push("@query");
   }
-
-  const hasBody = params.body !== undefined && params.body !== null;
-  const contentDigest = hasBody ? await computeContentDigest(params.body) : null;
-
-  const components = ["@method", "@path", "@authority"];
+  components.push("@authority");
   if (contentDigest !== null) {
     components.push("content-digest");
   }
@@ -175,11 +270,12 @@ export async function signRequest(params: SignRequestParams): Promise<SignedHead
   });
 
   const signatureBase = createSignatureBase({
-    method: params.method,
+    method,
     path: params.path,
     authority: params.authority,
     contentDigest,
     signatureParams,
+    components,
   });
 
   const signatureBuffer = await globalThis.crypto.subtle.sign(
@@ -207,7 +303,10 @@ export async function signRequest(params: SignRequestParams): Promise<SignedHead
 }
 
 /**
- * Verify an incoming RFC 9421 HTTP Message Signature.
+ * Verify an incoming RFC 9421 HTTP Message Signature. The signature base is built from the components the
+ * signature declares, which must include "@method", "@path" and "@authority", plus "@query" when the request
+ * has a query string and "content-digest" when it has a body or is a POST / PUT / PATCH.
+ * Replay protection uses `replayStore` (default: per-process memory; use a shared store across instances).
  */
 export async function verifyRequestSignature(
   params: VerifySignatureParams
@@ -238,17 +337,30 @@ export async function verifyRequestSignature(
   const signatureParams = sigInputMatch[1].trim();
 
   // Validate parameters and check for component duplicates
-  const coveredComponentsMatch = signatureParams.match(/^\(([^)]*)\)/);
-  if (!coveredComponentsMatch) {
-    return { valid: false, error: "Signature-Input missing covered components list" };
+  const parsed = parseSignatureParams(signatureParams);
+  if (typeof parsed === "string") {
+    return { valid: false, error: parsed };
   }
-  const rawComponents = coveredComponentsMatch[1].trim().split(/\s+/).filter(Boolean);
+  const components = parsed.components;
   const seenComponents = new Set<string>();
-  for (const c of rawComponents) {
+  for (const c of components) {
     if (seenComponents.has(c)) {
       return { valid: false, error: `Duplicate covered component in Signature-Input: ${c}` };
     }
     seenComponents.add(c);
+  }
+  for (const required of ["@method", "@path", "@authority"]) {
+    if (!seenComponents.has(required)) {
+      return { valid: false, error: `Signature does not cover ${required}` };
+    }
+  }
+  if (splitRequestTarget(params.path).query !== "?" && !seenComponents.has("@query")) {
+    return { valid: false, error: "Request has a query string but the signature does not cover @query" };
+  }
+  const body = params.body;
+  const hasBody = body !== undefined && body !== null && (typeof body === "string" ? body.length > 0 : body.byteLength > 0);
+  if ((hasBody || BODY_METHODS.has(params.method.toUpperCase())) && !seenComponents.has("content-digest")) {
+    return { valid: false, error: "Request has a body but the signature does not cover content-digest" };
   }
 
   // RFC 8941 byte sequence (`:base64:`), standard alphabet with padding only, so each signature
@@ -262,11 +374,10 @@ export async function verifyRequestSignature(
     return { valid: false, error: `Signature header does not contain valid ${SIGNATURE_LABEL} byte sequence` };
   }
 
-  const createdMatch = signatureParams.match(/created=(\d+)/);
-  if (!createdMatch) {
+  const created = parsed.params.created;
+  if (typeof created !== "number") {
     return { valid: false, error: "Signature-Input missing created timestamp" };
   }
-  const created = parseInt(createdMatch[1], 10);
   const now = params.currentTime ?? Math.floor(Date.now() / 1000);
   const maxSkew = params.maxClockSkewSeconds ?? MAX_CLOCK_SKEW_SECONDS;
 
@@ -274,8 +385,11 @@ export async function verifyRequestSignature(
     return { valid: false, error: `Signature timestamp expired or clock skew too large (created=${created}, now=${now})` };
   }
 
-  const keyidMatch = signatureParams.match(/keyid="([^"]+)"/);
-  const keyid = keyidMatch ? keyidMatch[1] : undefined;
+  const keyidParam = parsed.params.keyid;
+  if (keyidParam !== undefined && typeof keyidParam !== "string") {
+    return { valid: false, error: "Signature-Input keyid must be a string" };
+  }
+  const keyid = keyidParam || undefined;
   if (keyid) {
     try {
       assertSafeIdentifier("keyid", keyid);
@@ -285,19 +399,19 @@ export async function verifyRequestSignature(
   }
 
   // Entries must outlive the whole acceptance window (created ± maxSkew).
+  const replayStore = params.replayStore ?? globalReplayCache;
   const replayKey = `${keyid ?? ""}:${bytesToHex(signatureBytes)}`;
   const replayTtlMs = 2 * Math.max(maxSkew, 1) * 1000;
-  if (params.replayCheck !== false && globalReplayCache.has(replayKey)) {
+  if (params.replayCheck !== false && (await replayStore.has(replayKey))) {
     return { valid: false, error: "Replay detected: request signature was already presented" };
   }
 
-  const algMatch = signatureParams.match(/alg="([^"]+)"/);
-  const alg = algMatch ? algMatch[1] : undefined;
-  if (alg && alg.toLowerCase() !== "ed25519" && alg.toLowerCase() !== "eddsa") {
+  const alg = parsed.params.alg;
+  if (alg !== undefined && (typeof alg !== "string" || (alg.toLowerCase() !== "ed25519" && alg.toLowerCase() !== "eddsa"))) {
     return { valid: false, error: `Unsupported signature algorithm: ${alg}` };
   }
 
-  if (signatureParams.includes('"content-digest"')) {
+  if (seenComponents.has("content-digest")) {
     if (!contentDigestHeader) {
       return { valid: false, error: "Signature covers content-digest but Content-Digest header is missing" };
     }
@@ -307,16 +421,28 @@ export async function verifyRequestSignature(
     }
   }
 
-  const signatureBase = createSignatureBase({
-    method: params.method,
-    path: params.path,
-    authority: params.authority,
-    contentDigest: signatureParams.includes('"content-digest"') ? contentDigestHeader?.trim() : null,
-    signatureParams,
-  });
-
   try {
-    const { publicKey } = await loadPublicKey(params.publicKey);
+    const additionalComponents: Record<string, string> = {};
+    for (const c of components) {
+      if (c.startsWith("@") || c === "content-digest") continue;
+      const value = getHeader(c);
+      if (value === undefined) {
+        return { valid: false, error: `Signature covers ${c} but the request has no such header` };
+      }
+      additionalComponents[c] = value;
+    }
+
+    const signatureBase = createSignatureBase({
+      method: params.method,
+      path: params.path,
+      authority: params.authority,
+      contentDigest: contentDigestHeader?.trim() ?? null,
+      signatureParams,
+      additionalComponents,
+      components,
+    });
+
+    const { publicKey } = await loadPublicKey(params.publicKey, keyid);
 
     const isValid = await globalThis.crypto.subtle.verify(
       "Ed25519",
@@ -329,12 +455,16 @@ export async function verifyRequestSignature(
       return { valid: false, error: "Cryptographic signature verification failed" };
     }
 
-    // Record only verified signatures; re-check synchronously in case a concurrent copy won.
-    if (params.replayCheck !== false) {
-      if (globalReplayCache.has(replayKey)) {
-        return { valid: false, error: "Replay detected: request signature was already presented" };
-      }
-      globalReplayCache.record(replayKey, replayTtlMs);
+    // Record only verified signatures. `record` is set-if-absent, so a concurrent copy that won the race,
+    // or a store too full to remember this signature, makes it fail closed.
+    if (params.replayCheck !== false && !(await replayStore.record(replayKey, replayTtlMs))) {
+      const full = !(await replayStore.has(replayKey));
+      return {
+        valid: false,
+        error: full
+          ? "Replay cache is full: refusing a signature that could not be remembered"
+          : "Replay detected: request signature was already presented",
+      };
     }
 
     return { valid: true, keyid };
@@ -349,11 +479,13 @@ export const JWT_CLOCK_SKEW_SECONDS = 60;
 /**
  * Zero-egress offline verification for asymmetric JWT token leases.
  * Requires a numeric `exp` and an audience (`aud` or `serviceSlug`) equal to `expectedServiceSlug`;
- * a verifier without an expected slug rejects every lease. `iss` is checked when `expectedIssuer` is set.
+ * a verifier without an expected slug rejects every lease. `iss` is checked when `expectedIssuer` is set
+ * (Daywalker documents no fixed issuer, so there is no default). Segments must be canonical unpadded
+ * base64url, a `crit` header is rejected, and a JWKS `publicKey` is searched by the header's `kid`.
  */
 export async function verifyJwtLease(params: {
   token: string;
-  publicKey: string | PublicJwk | CryptoKey;
+  publicKey: string | PublicJwk | PublicJwks | CryptoKey;
   expectedServiceSlug?: string;
   expectedIssuer?: string;
   currentTime?: number;
@@ -366,8 +498,16 @@ export async function verifyJwtLease(params: {
     }
 
     const [headerB64, payloadB64, signatureB64] = parts;
-    const headerJson = utf8ToString(base64UrlToBytes(headerB64));
-    const payloadJson = utf8ToString(base64UrlToBytes(payloadB64));
+    let headerJson: string;
+    let payloadJson: string;
+    let signatureBytes: Uint8Array;
+    try {
+      headerJson = utf8ToString(base64UrlToBytesStrict(headerB64));
+      payloadJson = utf8ToString(base64UrlToBytesStrict(payloadB64));
+      signatureBytes = base64UrlToBytesStrict(signatureB64);
+    } catch {
+      return { valid: false, error: "JWT segments must be canonical unpadded base64url" };
+    }
 
     const header = JSON.parse(headerJson);
     const payload = JSON.parse(payloadJson);
@@ -381,10 +521,16 @@ export async function verifyJwtLease(params: {
     if (header.typ !== undefined && String(header.typ).toUpperCase() !== "JWT") {
       return { valid: false, error: `Unsupported JWT typ: ${header.typ}` };
     }
+    // RFC 7515 §4.1.11: extensions we don't understand must be rejected; we implement none.
+    if (header.crit !== undefined) {
+      return { valid: false, error: "Unsupported JWT crit header" };
+    }
+    if (header.kid !== undefined && typeof header.kid !== "string") {
+      return { valid: false, error: "JWT kid must be a string" };
+    }
 
-    const { publicKey } = await loadPublicKey(params.publicKey);
+    const { publicKey } = await loadPublicKey(params.publicKey, header.kid);
     const signedData = stringToUtf8(`${headerB64}.${payloadB64}`);
-    const signatureBytes = base64UrlToBytes(signatureB64);
 
     const isValid = await globalThis.crypto.subtle.verify(
       "Ed25519",

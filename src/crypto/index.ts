@@ -5,6 +5,7 @@ export {
   base64ToBytes,
   bytesToBase64Url,
   base64UrlToBytes,
+  base64UrlToBytesStrict,
   bytesToHex,
   hexToBytes,
   timingSafeEqual,
@@ -32,6 +33,8 @@ export {
   SIGNATURE_LABEL,
   SIGNATURE_ALG,
   MAX_CLOCK_SKEW_SECONDS,
+  REPLAY_CACHE_MAX_ENTRIES,
+  SignatureReplayCache,
   formatSignatureParams,
   createSignatureBase,
   signRequest,
@@ -45,4 +48,5 @@ export type {
   SignRequestParams,
   VerifySignatureParams,
   VerifySignatureResult,
+  ReplayStore,
 } from "./signatures.js";
