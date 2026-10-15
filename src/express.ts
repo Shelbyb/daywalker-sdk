@@ -1,4 +1,5 @@
 import { daywalker, Daywalker } from "./client.js";
+import { toAuthFailureResponse } from "./middleware.js";
 import type { TokenPayload } from "./types.js";
 
 interface Req {
@@ -21,8 +22,9 @@ interface Res {
 /**
  * Express / Connect / Node http middleware that validates incoming Daywalker tokens.
  */
-export function daywalkerAuth(options: { client?: Daywalker } = {}) {
+export function daywalkerAuth(options: { client?: Daywalker; serviceSlug?: string } = {}) {
   const client = options.client ?? daywalker;
+  const serviceSlug = options.serviceSlug;
 
   return async (req: Req, res: Res, next?: (err?: unknown) => void) => {
     const getHeader = (name: string): string | undefined => {
@@ -55,19 +57,19 @@ export function daywalkerAuth(options: { client?: Daywalker } = {}) {
       return;
     }
 
-    const result = await client.validateToken(token);
+    const result = await client.validateToken(token, { serviceSlug });
     if (!result.ok) {
-      const status = result.status === 429 ? 429 : 401;
-      if (result.retryAfter) {
-        res.setHeader("Retry-After", String(result.retryAfter));
+      const { status, ...body } = toAuthFailureResponse(result);
+      if (body.retryAfter) {
+        res.setHeader("Retry-After", String(body.retryAfter));
       }
       if (typeof res.status === "function" && typeof res.json === "function") {
-        res.status(status).json({ error: result.error, message: result.message, retryAfter: result.retryAfter });
+        res.status(status).json(body);
         return;
       }
       res.statusCode = status;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: result.error, message: result.message, retryAfter: result.retryAfter }));
+      res.end(JSON.stringify(body));
       return;
     }
 
