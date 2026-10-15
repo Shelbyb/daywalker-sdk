@@ -22,9 +22,15 @@ export class DevPulseWebProvider implements Provider {
   ) {}
 
   async initialize(context?: EvaluationContext): Promise<void> {
-    this.client = createClient(this.clientSideId, toDevPulseContext(context ?? {}) as never, { ...this.options, withReasons: true });
-    this.client.on("change", (changes: unknown) => this.events.emit(ProviderEvents.ConfigurationChanged, { flagsChanged: Object.keys(changes as object) }));
-    await this.client.waitForInitialization();
+    void this.client?.close(); // re-initialized: don't leak the previous client
+    const client = createClient(this.clientSideId, toDevPulseContext(context ?? {}) as never, { ...this.options, withReasons: true });
+    this.client = client;
+    client.on("change", (changes: unknown) => this.events.emit(ProviderEvents.ConfigurationChanged, { flagsChanged: Object.keys(changes as object) }));
+    // Before initialization a failure rejects initialize() instead, which OpenFeature reports itself.
+    client.on("failed", (err: unknown) => client.isInitialized && this.events.emit(ProviderEvents.Error, { message: (err as Error)?.message ?? "DevPulse client failed" }));
+    client.on("stale", (err: unknown) => this.events.emit(ProviderEvents.Stale, { message: (err as Error)?.message ?? "DevPulse stream lost; serving last known flags" }));
+    client.on("recovered", () => this.events.emit(ProviderEvents.Ready));
+    await client.waitForInitialization();
   }
 
   async onContextChange(_old: EvaluationContext, next: EvaluationContext): Promise<void> {

@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import { expect } from "./helpers/expect.js";
-import { createAnalytics, uuidv7 } from "../src/analytics/index.js";
+import { VERSION, createAnalytics, uuidv7 } from "../src/analytics/index.js";
+import { SDK_VERSION } from "../src/flags/common/version.js";
 
 type Batch = { event: string; distinct_id: string; properties: Record<string, unknown>; $set?: Record<string, unknown> };
 
@@ -91,5 +92,129 @@ describe("analytics", () => {
     expect(a < b).toBe(true);
     expect(a[14]).toBe("7");
     expect(a.slice(0, 8)).toBe("018bcfe5");
+  });
+
+  it("drops an in-flight batch that fails after optOut() instead of retrying it", async () => {
+    let call = 0;
+    const sent: string[] = [];
+    let release!: () => void;
+    const fetch = (async (_u: string, init: RequestInit) => {
+      call++;
+      if (call === 1) {
+        await new Promise<void>((r) => (release = r));
+        throw new TypeError("offline");
+      }
+      sent.push(...(JSON.parse(String(init.body)) as { batch: { event: string }[] }).batch.map((e) => e.event));
+      return Response.json({ status: 1 });
+    }) as unknown as typeof globalThis.fetch;
+    const a = createAnalytics({ writeKey: "dpa_x", host: "https://dp", fetch, flushAt: 1 });
+    a.capture("viewed_pricing"); // in flight
+    a.optOut();
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    await a.flush();
+    a.optIn();
+    await a.flush();
+    expect(sent).toEqual([]);
+    await a.shutdown();
+  });
+
+  it("reports the package version", async () => {
+    expect(VERSION).toBe(SDK_VERSION);
+    const f = fakeFetch();
+    const a = createAnalytics({ writeKey: "dpa_test", host: "https://dp", fetch: f.fetch });
+    a.capture("x");
+    await a.flush();
+    expect(f.calls[0]!.body.batch[0]!.properties.$lib_version).toBe("0.4.0");
+  });
+});
+
+describe("analytics in a browser", () => {
+  type Sent = { body: string; keepalive?: boolean };
+  /** Fake just enough of a browser, then load a fresh copy of the module (it detects browsers at load). */
+  async function browser(href: string, beaconOk = true) {
+    const beacons: string[] = [];
+    const listeners: Record<string, (() => void)[]> = {};
+    const on = (t: string, fn: () => void) => void (listeners[t] ??= []).push(fn);
+    const u = new URL(href);
+    const g = globalThis as Record<string, unknown>;
+    const saved = Object.fromEntries(["window", "document", "location", "history", "screen", "navigator"].map((k) => [k, Object.getOwnPropertyDescriptor(g, k)]));
+    const def = (k: string, v: unknown) => Object.defineProperty(g, k, { value: v, configurable: true, writable: true });
+    def("window", { addEventListener: on, removeEventListener() {}, innerWidth: 1, innerHeight: 1 });
+    def("document", { addEventListener: on, removeEventListener() {}, referrer: "https://app.example.com/reset/tok_secret?x=1", title: "t", visibilityState: "visible" });
+    def("location", { href: u.href, host: u.host, pathname: u.pathname, search: u.search });
+    def("history", { pushState() {}, replaceState() {} });
+    def("screen", { width: 1, height: 1 });
+    def("navigator", { language: "en", sendBeacon: (_u: string, blob: Blob) => (blob.text().then((t) => beacons.push(t)), beaconOk) });
+    const mod = (await import(`../src/analytics/index.js?browser=${Math.random()}`)) as typeof import("../src/analytics/index.js");
+    const restore = () => {
+      for (const [k, d] of Object.entries(saved)) {
+        if (d) Object.defineProperty(g, k, d);
+        else delete g[k];
+      }
+    };
+    return { mod, beacons, fire: (t: string) => listeners[t]?.forEach((fn) => fn()), restore };
+  }
+
+  it("uses keepalive only for bodies under 60 KB, and beacons in chunks under 60 KB", async () => {
+    const b = await browser("https://app.example.com/home");
+    try {
+      const sent: Sent[] = [];
+      const fetch = (async (_u: string, init: RequestInit) => {
+        sent.push({ body: String(init.body), keepalive: init.keepalive });
+        return Response.json({});
+      }) as unknown as typeof globalThis.fetch;
+      const a = b.mod.createAnalytics({ writeKey: "dpa_b", host: "https://dp", fetch, persistence: "memory", autocapturePageviews: false, flushAt: 1000 });
+      a.capture("small");
+      await a.flush();
+      for (let i = 0; i < 20; i++) a.capture("big", { blob: "x".repeat(5000) });
+      await a.flush();
+      expect(sent.map((s) => s.keepalive)).toEqual([true, false]);
+      expect(Buffer.byteLength(sent[1]!.body)).toBeGreaterThan(60_000);
+      // Page hide: beacons, each under the 64 KiB budget, covering every queued event.
+      for (let i = 0; i < 30; i++) a.capture("big", { blob: "y".repeat(5000) });
+      b.fire("pagehide");
+      await new Promise((r) => setTimeout(r, 10));
+      expect(b.beacons.length).toBeGreaterThan(1);
+      for (const body of b.beacons) expect(Buffer.byteLength(body)).toBeLessThan(60_000);
+      expect(b.beacons.flatMap((body) => (JSON.parse(body) as { batch: unknown[] }).batch)).toHaveLength(30);
+      await a.shutdown();
+    } finally {
+      b.restore();
+    }
+  });
+
+  it("keeps events queued when the beacon is refused", async () => {
+    const b = await browser("https://app.example.com/home", false);
+    try {
+      const f = fakeFetch();
+      const a = b.mod.createAnalytics({ writeKey: "dpa_b2", host: "https://dp", fetch: f.fetch, persistence: "memory", autocapturePageviews: false, flushAt: 1000 });
+      a.capture("x");
+      b.fire("pagehide");
+      await a.flush();
+      expect(f.calls[0]!.body.batch.map((e) => e.event)).toEqual(["x"]);
+      await a.shutdown();
+    } finally {
+      b.restore();
+    }
+  });
+
+  it("applies sanitizePath to every path and URL it sends", async () => {
+    const b = await browser("https://app.example.com/reset/tok_secret?utm_source=mail&code=1#frag");
+    try {
+      const f = fakeFetch();
+      const a = b.mod.createAnalytics({ writeKey: "dpa_b3", host: "https://dp", fetch: f.fetch, persistence: "memory", sanitizePath: (p) => p.replace(/^\/reset\/[^/]+/, "/reset/:token") });
+      await a.flush();
+      const pv = f.calls[0]!.body.batch[0]! as { event: string; properties: Record<string, unknown>; $set_once?: Record<string, unknown> };
+      expect(pv.event).toBe("$pageview");
+      expect(pv.properties.$pathname).toBe("/reset/:token");
+      expect(pv.properties.$current_url).toBe("https://app.example.com/reset/:token?utm_source=mail");
+      expect(pv.properties.$referrer).toBe("https://app.example.com/reset/:token");
+      expect(pv.$set_once).toMatchObject({ $initial_pathname: "/reset/:token", $initial_current_url: "https://app.example.com/reset/:token?utm_source=mail" });
+      expect(JSON.stringify(f.calls)).not.toMatch(/tok_secret/);
+      await a.shutdown();
+    } finally {
+      b.restore();
+    }
   });
 });
