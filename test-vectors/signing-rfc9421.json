@@ -46,6 +46,18 @@
       "signatureParams": "(\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561602;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
       "signatureBase": "\"@method\": POST\n\"@path\": /api/v1/tokens/validate\n\"@authority\": auth.daywalker.dev\n\"content-digest\": sha-256=:vD4SP1vx++VS7R631pQ5kIiL10GhdN+irulBzjACv2M=:\n\"@signature-params\": (\"@method\" \"@path\" \"@authority\" \"content-digest\");created=1791561602;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
       "signature": "sig1=:eTXMD+2/cX9axV31se7n8+U7Zys+eHAAThlsECksfDagr7B6Ljybd4lUmKpdwplcIVj4tHxhm1NIwddJUQS6BA==:"
+    },
+    {
+      "name": "query-get",
+      "method": "GET",
+      "path": "/api/v1/services?limit=10&cursor=a%2Fb",
+      "authority": "auth.daywalker.dev",
+      "timestamp": 1791561603,
+      "body": "",
+      "contentDigest": "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:",
+      "signatureParams": "(\"@method\" \"@path\" \"@query\" \"@authority\" \"content-digest\");created=1791561603;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signatureBase": "\"@method\": GET\n\"@path\": /api/v1/services\n\"@query\": ?limit=10&cursor=a%2Fb\n\"@authority\": auth.daywalker.dev\n\"content-digest\": sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:\n\"@signature-params\": (\"@method\" \"@path\" \"@query\" \"@authority\" \"content-digest\");created=1791561603;keyid=\"ZWc1aU9I3TRxF4uX5MgzsFx9xSytBk3ogmI-SFXjfxg\";alg=\"ed25519\"",
+      "signature": "sig1=:UsXduXN1PV/LHmcuTV2TwuzAIrqMmHXYbq8IQJKGaFY6JGOl8r1iZ5HzloLRa8YQrfz/eLoCYteQi+wlHmQZAg==:"
     }
   ]
 }

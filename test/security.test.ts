@@ -16,7 +16,7 @@ import {
 } from "../src/index.js";
 import { SignatureReplayCache } from "../src/crypto/signatures.js";
 import { MAX_VALIDATION_CACHE_ENTRIES } from "../src/client.js";
-import { createDaywalkerMiddleware, createDaywalkerServiceHealthMiddleware, isStaticAssetPath } from "../src/next.js";
+import { STATIC_FILE_EXTENSIONS, createDaywalkerMiddleware, createDaywalkerServiceHealthMiddleware, isStaticAssetPath } from "../src/next.js";
 import { createAnalytics, sanitizeUrl } from "../src/analytics/index.js";
 import { createClient } from "../src/flags/client.js";
 import { init } from "../src/flags/node.js";
@@ -72,12 +72,17 @@ describe("RFC 9421 replay cache", () => {
     }
   });
 
-  it("caps the cache size, evicting the oldest entries", () => {
+  it("caps the cache size by refusing new entries, never evicting unexpired ones", () => {
     const cache = new SignatureReplayCache(3);
-    for (const k of ["a", "b", "c", "d"]) cache.record(k, 60_000);
+    const t = 1_000_000;
+    assert.deepStrictEqual(["a", "b", "c", "d"].map((k) => cache.record(k, 60_000, t)), [true, true, true, false]);
     assert.strictEqual(cache.size, 3);
-    assert.strictEqual(cache.has("a"), false);
-    assert.strictEqual(cache.has("d"), true);
+    assert.strictEqual(cache.has("a", t), true);
+    assert.strictEqual(cache.has("d", t), false);
+    assert.strictEqual(cache.record("a", 60_000, t), false); // already present
+    // Expired entries make room again.
+    assert.strictEqual(cache.record("d", 60_000, t + 60_001), true);
+    assert.strictEqual(cache.size, 1);
   });
 });
 
@@ -136,12 +141,16 @@ describe("Per-request auth never falls back to the service key", () => {
 });
 
 describe("Next middleware static bypass", () => {
-  it("skips only Next static output, the favicon and allowlisted extensions outside /api", async () => {
-    for (const p of ["/_next/static/chunks/app.js", "/_next/image", "/favicon.ico", "/logo.png", "/fonts/a.woff2", "/robots.txt"]) {
+  it("skips only Next static output and the favicon (extensions are opt-in), never /api", async () => {
+    for (const p of ["/_next/static/chunks/app.js", "/_next/image", "/favicon.ico"]) {
       assert.strictEqual(isStaticAssetPath(p), true, p);
     }
-    for (const p of ["/_next/data/build/page.json", "/api/report.js", "/api/x.png", "/dashboard", "/export.pdf", "/_next/webpack-hmr"]) {
+    for (const p of ["/logo.png", "/fonts/a.woff2", "/robots.txt"]) {
       assert.strictEqual(isStaticAssetPath(p), false, p);
+      assert.strictEqual(isStaticAssetPath(p, STATIC_FILE_EXTENSIONS), true, p);
+    }
+    for (const p of ["/_next/data/build/page.json", "/api/report.js", "/api/x.png", "/dashboard", "/export.pdf", "/_next/webpack-hmr"]) {
+      assert.strictEqual(isStaticAssetPath(p, STATIC_FILE_EXTENSIONS), false, p);
     }
     const client = new Daywalker({ serviceSlug: "svc", fetch: async () => Response.json({ valid: true }) });
     const mw = createDaywalkerMiddleware({ client, protectApiOnly: true });
