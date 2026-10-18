@@ -277,7 +277,7 @@ function redirectError(what: string, res: Response): DaywalkerError {
  * anything else (invalid_client, access_denied, an outage) is a 503, since it says nothing about the
  * caller's token. Never cached.
  */
-function credentialFailure(err: DaywalkerAuthError): ValidateResult {
+function credentialFailure(err: DaywalkerAuthError | DaywalkerError): ValidateResult {
   if (err.code === "CONFIGURATION_ERROR") {
     return { ok: false, error: "CONFIGURATION_ERROR", status: 500, message: err.message };
   }
@@ -1225,7 +1225,7 @@ export class Daywalker {
       });
     } catch (err) {
       // This service couldn't get its own access token: says nothing about the caller's token.
-      if (err instanceof DaywalkerAuthError) return credentialFailure(err);
+      if (err instanceof DaywalkerAuthError || err instanceof DaywalkerError) return credentialFailure(err);
       return {
         ok: false,
         error: "NETWORK_ERROR",
@@ -1252,7 +1252,7 @@ export class Daywalker {
       else await this.accessToken();
       tokens = this.#tokens!;
     } catch (err) {
-      if (err instanceof DaywalkerAuthError) return credentialFailure(err);
+      if (err instanceof DaywalkerAuthError || err instanceof DaywalkerError) return credentialFailure(err);
       return {
         ok: false,
         error: "NETWORK_ERROR",

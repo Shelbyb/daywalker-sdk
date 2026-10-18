@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0
+**Per-service license keys, sealed config bundle, and tamper resistance.** Adds technical enforcement ensuring consumer apps cannot bypass Daywalker verification without breaking functionality.
+- `client.getLicense({ serviceSlug?, forceRefresh? })`: returns `{ serviceSlug, licenseKey, expiresAt }`. The derived key is computed as HKDF-SHA256(serviceSecret, salt = serviceSlug + keyId + hourWindow, info = "daywalker-license-v1") and cached in memory until shortly before expiry.
+- `client.fetchBundle({ serviceSlug?, forceRefresh? })`: returns decrypted JSON config bundle (`{ serviceSlug, dataKeySalt, features, issuedAt, expiresAt }`) sealed with AES-256-GCM under the derived license key.
+- Revocation handling: throws `DaywalkerAuthError` on `SERVICE_REVOKED`, `SERVICE_SUSPENDED`, `DOMAIN_REVOKED`, or `DOMAIN_MISMATCH`.
+- Backward compatible with `validateServiceCredentials()` and requires no new environment variables.
+- Exported types: `License`, `LicenseOptions`, `ConfigBundle`.
+
 ## 0.8.0
 **Service licensing** (needs the auth.daywalker.dev release with per-service licenses and `POST /api/v1/services/:slug/bundle`). Fully additive; `validateServiceCredentials()` is unchanged.
 - New `client.getLicense({ serviceSlug?, forceRefresh? })` returning `{ serviceSlug, licenseKey, expiresAt }`. The key is derived by Daywalker per service, signing key and one-hour window, comes with the client credentials grant, and is cached in memory until a minute before it expires. It is never part of `TokenSet` or `toJSON()`.
