@@ -406,7 +406,7 @@ describe("Keys, rotation and JWT strictness", () => {
   const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const jwt = (key: crypto.KeyObject, header: Record<string, unknown>, payload: Record<string, unknown> = { aud: "svc", exp: now + 600 }) => {
     const h = enc({ alg: "EdDSA", typ: "JWT", ...header });
-    const p = enc(payload);
+    const p = enc({ jti: "j1", iss: "https://auth.daywalker.dev", ...payload });
     return `${h}.${p}.${crypto.sign(null, Buffer.from(`${h}.${p}`), key).toString("base64url")}`;
   };
   const verify = (token: string, publicKey: unknown = jwks) =>

@@ -92,7 +92,7 @@ describe("JWT lease claims", () => {
   const now = Math.floor(Date.now() / 1000);
   const jwt = (payload: Record<string, unknown>, header: Record<string, unknown> = { alg: "EdDSA", typ: "JWT" }) => {
     const h = Buffer.from(JSON.stringify(header)).toString("base64url");
-    const b = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const b = Buffer.from(JSON.stringify({ jti: "j1", iss: "https://auth.daywalker.dev", ...payload })).toString("base64url");
     return `${h}.${b}.${crypto.sign(null, Buffer.from(`${h}.${b}`), privateKey).toString("base64url")}`;
   };
   const verify = (token: string, extra: Record<string, unknown> = {}) =>
@@ -105,12 +105,12 @@ describe("JWT lease claims", () => {
     assert.match((await verify(jwt({ exp: now + 60 }))).error!, /no aud or serviceSlug/);
     assert.match((await verify(jwt({ aud: "other", serviceSlug: "myservice", exp: now + 60 }))).error!, /mismatch/);
     assert.match((await verify(jwt({ aud: "myservice", exp: now + 60, iss: "https://evil" }), { expectedIssuer: "https://auth.daywalker.dev" })).error!, /issuer mismatch/);
-    assert.match((await verify(jwt({ aud: "myservice", exp: now + 60 }, { alg: "EdDSA", typ: "at+jwt" }))).error!, /typ/);
+    assert.match((await verify(jwt({ aud: "myservice", exp: now + 60 }, { alg: "EdDSA", typ: "rt+jwt" }))).error!, /typ/);
   });
 
   it("allows a small bounded clock skew on exp", async () => {
-    assert.strictEqual((await verify(jwt({ aud: "myservice", exp: now - 30 }))).valid, true);
-    assert.match((await verify(jwt({ aud: "myservice", exp: now - 61 }))).error!, /expired/);
+    assert.strictEqual((await verify(jwt({ aud: "myservice", exp: now - 29 }))).valid, true);
+    assert.match((await verify(jwt({ aud: "myservice", exp: now - 31 }))).error!, /expired/);
   });
 
   it("never caches a lease past its exp", async () => {

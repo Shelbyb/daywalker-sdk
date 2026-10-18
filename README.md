@@ -61,7 +61,7 @@ The private key is never printed unless you pass `--print-key`.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DAYWALKER_API_KEY` | ✅ | The service's Daywalker API token (`srv_live_…`) or JWT lease |
+| `DAYWALKER_API_KEY` | ✅ | The service's Daywalker API token (`srv_live_…`) or access token |
 | `DAYWALKER_SERVICE_SLUG` | ✅ | The service slug to validate against (e.g. `sonalyze`). One API key can cover several services: a comma-separated list (`gigpulse,devpulse`) is accepted and the first is the default. See [One API key, several services](#one-api-key-several-services) |
 | `DAYWALKER_SIGNING_KEY` | for signed requests | Ed25519 private key from `daywalker init` (PKCS#8 Base64 DER or PEM) |
 | `DAYWALKER_KEY_ID` | optional | RFC 7638 JWK thumbprint derived during key generation |
@@ -69,7 +69,7 @@ The private key is never printed unless you pass `--print-key`.
 | `DAYWALKER_DOMAIN` | optional | Optional caller identifier or host domain name |
 | `DAYWALKER_PUBLIC_KEY` | optional | Daywalker Auth public key for zero-egress offline JWT lease verification |
 | `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev`; must be `https://` (except localhost) |
-| `DAYWALKER_LEASE_ISSUER` | optional | Expected `iss` of offline-verified JWT leases |
+| `DAYWALKER_LEASE_ISSUER` | optional | Expected `iss` of offline-verified JWTs (default `https://auth.daywalker.dev`) |
 
 ---
 
@@ -211,26 +211,51 @@ DAYWALKER_API_KEY=srv_live_… npx daywalker init --service gigpulse --domain gi
 DAYWALKER_API_KEY=srv_live_… npx daywalker init --service devpulse --domain devpulse.daywalker.dev
 ```
 
-`init` and `rotate` fail right away with `service_not_covered` if the API key doesn't cover the slug you name. An app that serves several services lists them all, `--service gigpulse,devpulse` (`DAYWALKER_SERVICE_SLUG="gigpulse,devpulse"`); the first is the default for `validateToken()`, and `client.config.serviceSlugs` holds the list.
+`init` and `rotate` take no service: the API key decides which services your credentials cover (`--service` is optional and only sets the audience for offline verification, `DAYWALKER_SERVICE_SLUG`).
 
-**The JWT lists every service.** Once your backend has authenticated with its signed request, ask for a lease. It lists all the service slugs the token covers (and may use right now):
+**Client credentials flow (the JWT lists every service).** Your backend authenticates with its client credentials (API key + registered signing key) and gets a short-lived access token (5 to 15 minutes) plus a rotating refresh token. No request names a service; the token lists them:
 
 ```ts
-const lease = await client.issueLease();
-lease.services; // ["gigpulse", "devpulse"]; also the JWT's `services` and `aud` claims
+const tokens = await client.getTokens();
+tokens.services; // ["gigpulse", "devpulse"]; also the JWT's `services` and `aud` claims
 
-// Least privilege: only what this process needs. A service the key doesn't cover is refused (403 SERVICE_NOT_GRANTED).
-const narrow = await client.issueLease({ services: ["devpulse"], ttlSeconds: 3600 });
+// Least privilege: only what this process needs (403 SERVICE_NOT_GRANTED for a service the key doesn't cover)
+await client.getTokens({ scope: ["devpulse"], expiresIn: 600 });
+
+// Always-fresh access token: refreshes (and re-authenticates if the session ended) automatically
+const accessToken = await client.accessToken();
 ```
 
-Services that are inactive, in `DRAFT`, `TESTING` (unless an admin owns the token), or no longer entitled to the token's owner are left out. Check `lease.services` rather than assuming.
+**Refresh token rotation.** `client.refreshTokens()` swaps the refresh token for a *new* access token and a *new* refresh token; the old one stops working. Daywalker keeps each session's refresh tokens as a family: presenting an old one again is treated as theft and revokes the whole family, so your client has to start over with its credentials. `accessToken()` serializes refreshes so concurrent requests never present the same token twice. Don't refresh from several processes with one session.
 
-Whoever receives the lease verifies it for **their own** service. It only passes when that slug is in the lease's `services` and `aud`:
+**The access token** is an EdDSA JWT (RFC 9068, `typ: at+jwt`) with `iss`, `aud`, `jti`, `iat`, `nbf`, `exp`, `services`, and a `user` object: the user's public UUID v7 `id`, `name` and `email`. Read it with `accessTokenUser(payload)` **after** verifying:
+
+```ts
+import { verifyJwtLease, accessTokenUser } from "@shelbyb/daywalker-sdk";
+const res = await verifyJwtLease({ token, publicKey: jwks, expectedServiceSlug: "devpulse", expectedIssuer: "https://auth.daywalker.dev" });
+if (res.valid) accessTokenUser(res.payload!); // { id: "018f…", name: "Ada", email: "ada@example.com" }
+```
+
+Verification is strict: only `EdDSA` (never `none` or HMAC, so no algorithm confusion), canonical base64url, `typ` `at+jwt`, issuer, your audience, required `jti` and `exp`, and at most 30 seconds of clock skew. Never decode a token without verifying it.
+
+**Web apps: HttpOnly cookies.** Keep tokens on your server. If the browser must hold them, send them from your backend in cookies scripts can't read:
+
+```ts
+import { daywalkerCookies, clearTokenCookie } from "@shelbyb/daywalker-sdk";
+const tokens = await client.getTokens();
+const res = new Response("ok");
+for (const c of daywalkerCookies(tokens, { refreshPath: "/api/auth/refresh" })) res.headers.append("Set-Cookie", c);
+// HttpOnly; Secure; SameSite=Strict. The refresh token cookie is only sent to /api/auth/refresh.
+```
+
+Services that are inactive, in `DRAFT`, `TESTING` (unless an admin owns the token), or no longer entitled to the token's owner are left out. Check `tokens.services` rather than assuming.
+
+Whoever receives the access token verifies it for **their own** service. It only passes when that slug is in the token's `services` and `aud`:
 
 ```ts
 const verifier = new Daywalker({ serviceSlug: "devpulse", daywalkerPublicKey: process.env.DAYWALKER_PUBLIC_KEY });
 const result = await verifier.validateToken(incomingJwt);
-if (result.ok) result.data.services; // ["gigpulse", "devpulse"]: everything this lease covers
+if (result.ok) result.data.services; // ["gigpulse", "devpulse"]: everything this token covers
 ```
 
 Online validation of an `srv_live_…` token reports the same list in `result.data.services` (a server that predates multi-service tokens yields just the validated slug).
@@ -253,7 +278,7 @@ const client = new Daywalker({
 const result = await client.validateToken(incomingJwt);
 ```
 
-Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) containing your service slug, so `serviceSlug` must be configured. A lease that lists `services` must list yours too. `result.data.services` is every service the lease covers (see [One API key, several services](#one-api-key-several-services)). Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
+Tokens must have a numeric `exp`, a `jti`, and an `aud` (or `serviceSlug`) containing your service slug, so `serviceSlug` must be configured. A lease that lists `services` must list yours too. `result.data.services` is every service the lease covers (see [One API key, several services](#one-api-key-several-services)). Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
 
 ---
 
@@ -273,7 +298,7 @@ Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) containing your
 |---|---|---|
 | `POST /api/v1/tokens/validate` | `client.validateToken()` | Body `{ token, serviceSlug }`; signed with `Signature-Input`, `Signature`, `Content-Digest`. Errors: `400` (`DIGEST_MISMATCH`/missing fields), `401` (`INVALID_SIGNATURE`/invalid token), `403`, `429`. Response includes `valid`, `tokenId`, `tokenName`, `userId`, `stage`, `rateLimit`, `rateLimitHourly` and `X-RateLimit-*` / `X-RateLimit-Hourly-*` headers |
 | `POST /api/v1/keys/register` | `npx daywalker init` / `rotate` | Bearer auth; body `{ keyId, domain, publicKey, serviceSlug? }`; `403 service_not_covered` if the key doesn't cover `serviceSlug` |
-| `POST /api/v1/leases/issue` | `client.issueLease(ttlSeconds? \| { ttlSeconds?, services? })` | Signed request returns `{ lease, tokenType, expiresAt, jwksUri, services }` (EdDSA JWT listing every service the key covers; `services` narrows it) |
+| `POST /api/v1/oauth/token` | `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()`, `client.accessToken()` | `client_credentials` (signed request) and `refresh_token` grants return `{ accessToken, refreshToken, expiresAt, services, … }`; refresh tokens rotate and reuse revokes the session |
 | `GET /.well-known/jwks.json` | `client.fetchJwks()` | Daywalker public JWKS for offline lease verification |
 
 Inbound tokens may be supplied as `x-api-token: srv_live_...` or `Authorization: Bearer <JWT or API key>`.

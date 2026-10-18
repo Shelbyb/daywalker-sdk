@@ -25,8 +25,9 @@ export type {
   ValidateResult,
   RetryOptions,
   SelfCheckResult,
-  LeaseResponse,
-  IssueLeaseOptions,
+  TokenSet,
+  GetTokensOptions,
+  AccessTokenUser,
   PublicJwk,
   PublicJwks,
   SigningKey,
@@ -85,3 +86,6 @@ export type {
   VerifySignatureResult,
   ReplayStore,
 } from "./crypto/index.js";
+
+export { buildTokenCookie, clearTokenCookie, daywalkerCookies, accessTokenUser } from "./cookies.js";
+export type { TokenCookieOptions } from "./cookies.js";
