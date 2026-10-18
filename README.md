@@ -57,6 +57,44 @@ DAYWALKER_API_KEY=srv_live_... npx daywalker init --service my-service-slug --do
 
 The private key is never printed unless you pass `--print-key`.
 
+### Guided setup: `daywalker onboard`
+
+One command takes a new developer from nothing to a configured service:
+
+```bash
+npx daywalker onboard            # interactive
+npx daywalker onboard --dry-run  # show the plan; no network calls, no writes
+```
+
+Flow: sign up (or log in), verify the email (paste the link or token, or stop and resume later), pick a service from the live list (`GET /api/v1/services`), give the public app URL, create an API token (allowed origins: the app URL plus `https://localhost:3000`), write `DAYWALKER_API_KEY`, then register a signing key exactly as `init` does.
+
+- Flags: `--service <slug>` (skips the menu), `--url <https://app>`, `--name`, `--email`, `--existing-account`, `--dry-run`, `--yes`.
+- Non-interactive (`--yes`): the password comes from `DAYWALKER_ONBOARD_PASSWORD` and the emailed token from `DAYWALKER_ONBOARD_VERIFY_TOKEN`. Neither is ever logged or written to disk.
+- Progress is saved in a gitignored `.daywalker-onboard.json` (stage, name, email, domain, service; never the password, token or keys), so a stopped run resumes where it left off.
+- An existing `DAYWALKER_API_KEY` or project value in `.env.local` is never replaced without confirmation. The file is written atomically with mode `0600`.
+- Accounts with MFA can't use this flow; create the token in the dashboard instead.
+
+#### Project extension: `daywalker.onboard.mjs`
+
+A project can add its own prompts and `.env.local` values with an optional file at its root. It is plain JavaScript and needs no SDK import. Because it is executable code, onboarding asks before running it (`--yes` trusts it).
+
+```js
+export default {
+  defaultService: 'my-service',                 // skips the service menu
+  localOrigins: ['https://localhost:3000'],     // allowed on the token, besides the app URL
+  env: [
+    { key: 'SPOTIFY_CLIENT_ID', label: 'Spotify Client ID', required: true },
+    { key: 'SPOTIFY_CLIENT_SECRET', label: 'Spotify Client Secret', required: true, hidden: true },
+    { key: 'LASTFM_API_KEY', label: 'Last.fm API key', mirrorTo: ['NEXT_PUBLIC_LASTFM_API_KEY'] },
+  ],
+  generate: { NEXTAUTH_SECRET: 'base64-48' },   // base64-48 | base64-32 | hex-32; only if unset
+  fixed: { NEXTAUTH_URL: 'https://localhost:3000' },
+  nextSteps: (ctx) => [`Add the redirect URI for ${ctx.domain}`], // ctx: { slug, domain, localOrigins }
+};
+```
+
+Values may not contain quotes, `$`, backslashes or control characters, and the hook may not set `DAYWALKER_*` keys. Env values for non-interactive runs are read from the process environment by key.
+
 ### Or: ephemeral keys (nothing stored anywhere)
 
 With `ephemeralKey`, each process generates its signing key in memory as a **non-extractable** key. It registers that key with a lifetime and replaces it in place before it expires. There's no private key in env vars, files or a store, and nothing to rotate by hand:

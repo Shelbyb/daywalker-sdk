@@ -3,17 +3,23 @@ import fs from "node:fs";
 import path from "node:path";
 import { createDaywalker } from "./client.js";
 import { parseServiceSlugs, publicHostname } from "./config.js";
+import { runOnboard } from "./onboard/index.js";
 import { generateSigningKey, keySlotFor, listSigningKeys, loadSigningKey, registerPublicKey, redactSecrets, revokeSigningKey, type KeyApiResult } from "./crypto/index.js";
 
 const HELP = `daywalker: connect a service to Daywalker Auth (RFC 9421 / Push Architecture)
 
 Usage:
+  daywalker onboard [--service <slug>] [--url <https://app>] [--name <name>] [--email <email>] [--existing-account] [--dry-run] [--yes]
   daywalker init   [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--force] [--skip-register] [--json|--export] [--print-key]
   daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--skip-register] [--json|--export] [--print-key]
   daywalker check  [--offline]
   daywalker keys   [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--json]
   daywalker revoke <keyId> [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--force]
 
+onboard  Guided setup for a new developer: sign up (or log in), verify the email, pick a service from the live
+         list, give the public app URL, create an API token (allowed origins: the URL plus https://localhost:3000),
+         then register a signing key (same as init). Resumable via .daywalker-onboard.json (no secrets).
+         Non-interactive: --yes with DAYWALKER_ONBOARD_PASSWORD (and DAYWALKER_ONBOARD_VERIFY_TOKEN) in the env.
 init     Generates an Ed25519 keypair, registers the public key directly with Daywalker Auth
          (POST /api/v1/keys/register), and writes DAYWALKER_* settings to .env.local (or outputs JSON with --json).
          Nothing is written if registration fails. --force replaces an existing key (kept as
@@ -428,7 +434,10 @@ async function main() {
     return;
   }
 
-  if (cmd === "init") {
+  if (cmd === "onboard") {
+    const result = await runOnboard(parsedArgs, { init, readEnvFile, writeEnvFile, ensureGitignored });
+    if (result.exitCode) process.exit(result.exitCode);
+  } else if (cmd === "init") {
     await init(parsedArgs);
   } else if (cmd === "rotate") {
     await rotate(parsedArgs);

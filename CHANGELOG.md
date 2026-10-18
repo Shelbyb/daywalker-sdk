@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0
+- New `daywalker onboard` command: sign up or log in, verify the email, choose a service from the live `GET /api/v1/services` list, give the public app URL, create an API token (allowed origins: the URL plus the project's local origins, default `https://localhost:3000`), and register a signing key in-process (same as `init`). Resumable through a gitignored `.daywalker-onboard.json` that never holds the password, token or keys. Flags: `--service`, `--url`, `--name`, `--email`, `--existing-account`, `--dry-run`, `--yes`.
+- Optional project extension `daywalker.onboard.mjs` (confirmation required, `--yes` trusts it): extra env prompts, generated and fixed values, `mirrorTo`, `localOrigins`, `defaultService` and `nextSteps`. `DAYWALKER_*` keys are reserved, and values go through the same safety check as `.env.local` writes.
+- No new runtime dependencies. Existing commands are unchanged.
+
 ## 0.9.1
 - `fetchBundle()` errors now name the request and HTTP status (`Bundle request for <slug> failed (HTTP 401): ...`) and always carry a code: the service's `code`/`error`, otherwise derived from the status (`INVALID_TOKEN`, `FORBIDDEN`, `SERVICE_NOT_FOUND`, `RATE_LIMITED`, `SERVICE_UNAVAILABLE`, `BUNDLE_REQUEST_FAILED`).
 
