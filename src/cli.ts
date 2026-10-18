@@ -10,7 +10,7 @@ const HELP = `daywalker: connect a service to Daywalker Auth (RFC 9421 / Push Ar
 Usage:
   daywalker init   [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--force] [--skip-register] [--json|--export] [--print-key]
   daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--skip-register] [--json|--export] [--print-key]
-  daywalker check
+  daywalker check  [--offline]
 
 init     Generates an Ed25519 keypair, registers the public key directly with Daywalker Auth
          (POST /api/v1/keys/register), and writes DAYWALKER_* settings to .env.local (or outputs JSON with --json).
@@ -19,12 +19,14 @@ init     Generates an Ed25519 keypair, registers the public key directly with Da
 rotate   Generates a new Ed25519 key, registers it with Daywalker Auth, and keeps the old one
          in .env.local as DAYWALKER_SIGNING_KEY_PREVIOUS during deployment transition.
          Nothing is written, and the exit code is non-zero, unless registration succeeds.
-check    Validates configuration and confirms Daywalker Auth connection and signature readiness.
+check    Validates configuration and signature readiness, then runs the OAuth client credentials grant
+         against Daywalker Auth to confirm the credentials work and cover the configured service(s).
 
 Options:
   --api-key-stdin   Read the Daywalker API key from stdin (e.g. \`op read ... | daywalker init --api-key-stdin\`).
                     The key is otherwise taken from DAYWALKER_API_KEY in the environment or .env.local.
-                    --api-key <key> also works but exposes the key in shell history and process listings.
+                    (--api-key <key> is refused: it would expose the key in shell history and process listings.)
+  --offline         check only: skip the live OAuth client credentials check against Daywalker Auth.
   --skip-register   Do not register the public key (alias: --no-register); register it yourself before deploying.
   --json, --export  Output configuration as JSON for piping into Vercel, DigitalOcean, Fly.io, AWS SSM, etc.
                     The JSON includes the private key (DAYWALKER_SIGNING_KEY); nothing is written to .env.local.
@@ -59,7 +61,6 @@ async function readStdin(): Promise<string> {
 }
 
 async function resolveApiKey(opts: Record<string, string | boolean>, existing: Map<string, string>): Promise<string | null> {
-  if (typeof opts["api-key"] === "string") return opts["api-key"].trim() || null;
   if (opts["api-key-stdin"]) {
     const fromStdin = await readStdin();
     if (!fromStdin) fail("--api-key-stdin: no API key received on stdin");
@@ -315,10 +316,20 @@ async function rotate(opts: Record<string, string | boolean>) {
   if (opts["print-key"]) console.log(`\nDAYWALKER_SIGNING_KEY=${key.privateKeyPkcs8Base64}`);
 }
 
-async function check() {
+async function check(opts: Record<string, string | boolean>) {
   const env = { ...process.env, ...Object.fromEntries(readEnvFile(path.join(process.cwd(), ".env.local"))) };
   const client = createDaywalker({ env });
   const result = await client.selfCheck();
+
+  if (result.ok && !opts.offline) {
+    const live = await client.validateServiceCredentials();
+    if (!live.ok) {
+      result.ok = false;
+      result.problems.push(`OAuth client credentials check failed (${live.status} ${live.error}): ${live.message}`);
+    } else {
+      console.log(`✔ OAuth client credentials grant succeeded (services: ${(live.data.services ?? []).join(", ")})`);
+    }
+  }
 
   if (result.ok) {
     console.log(`✔ Daywalker configuration looks good`);
@@ -340,8 +351,8 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const parsedArgs = args(rest);
 
-  if (typeof parsedArgs["api-key"] === "string") {
-    console.warn("! --api-key exposes the key in shell history and process listings; prefer DAYWALKER_API_KEY in the environment or .env.local.");
+  if (parsedArgs["api-key"] !== undefined) {
+    fail("--api-key is not supported: it exposes the key in shell history and process listings. Use DAYWALKER_API_KEY in the environment or .env.local, or pipe it to --api-key-stdin.");
   }
 
   if (!cmd || cmd === "--help" || cmd === "-h" || cmd === "help") {
@@ -354,7 +365,7 @@ async function main() {
   } else if (cmd === "rotate") {
     await rotate(parsedArgs);
   } else if (cmd === "check") {
-    await check();
+    await check(parsedArgs);
   } else {
     fail(`Unknown command "${cmd}". Run \`daywalker --help\` for usage.`);
   }

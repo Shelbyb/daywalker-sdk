@@ -1,5 +1,5 @@
 import { daywalker, Daywalker } from "./client.js";
-import { toAuthFailureResponse } from "./middleware.js";
+import { readCredentials, toAuthFailureResponse } from "./middleware.js";
 import type { TokenPayload, ValidateResult } from "./types.js";
 
 /**
@@ -152,18 +152,26 @@ const REDIRECT_ERROR_CODES = new Set([
   "NETWORK_ERROR",
   "SERVICE_UNAVAILABLE",
   "CONFIGURATION_ERROR",
+  "SERVICE_NOT_GRANTED",
+  "DPOP_REQUIRED",
+  "INVALID_DPOP_PROOF",
 ]);
 
-function extractToken(req: Request): string | null {
-  const authHeader = req.headers.get("authorization");
-  if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
-    return authHeader.slice(7).trim();
-  }
-  const apiTokenHeader = req.headers.get("x-api-token");
-  if (apiTokenHeader) {
-    return apiTokenHeader.trim();
-  }
-  return null;
+function credentialsOf(req: Request) {
+  return readCredentials((name) => req.headers.get(name), { method: req.method, url: req.url });
+}
+
+/**
+ * Next's "continue" and redirect responses, built here rather than through a `NextResponse` found on
+ * `globalThis`: anything in the process could plant one there and turn a failed check into a pass.
+ * `x-middleware-next: 1` is exactly what `NextResponse.next()` sends.
+ */
+function continueResponse(): Response {
+  return new Response(null, { headers: { "x-middleware-next": "1" } });
+}
+
+function redirectResponse(url: URL): Response {
+  return Response.redirect(url.toString(), 307);
 }
 
 /**
@@ -172,7 +180,8 @@ function extractToken(req: Request): string | null {
  * Implements:
  * 1. Server Action probe defense (CVE-2025-55182 scanner mitigation)
  * 2. Static asset and health check bypass
- * 3. Per-request token auth: requests without `Authorization: Bearer` / `x-api-token` get 401
+ * 3. Per-request token auth: requests without `Authorization: Bearer` / `Authorization: DPoP` (with its
+ *    proof) / `x-api-token` get 401
  * 4. Distinct handling for API routes (JSON + CORS) vs UI pages (redirect to `errorPath` with `from`)
  *
  * Only `/_next/static/`, `/_next/image`, `/favicon.ico` and `bypassPaths` skip auth by default.
@@ -191,22 +200,23 @@ function extractToken(req: Request): string | null {
 export function createDaywalkerMiddleware(options: NextMiddlewareOptions = {}) {
   const client = options.client ?? daywalker;
   return buildMiddleware(options, async (request) => {
-    const token = extractToken(request);
-    if (!token) {
-      return { ok: false, error: "INVALID_TOKEN", status: 401, message: "Missing Authorization header or x-api-token" };
+    const credentials = credentialsOf(request);
+    if (!credentials.ok) {
+      return { ok: false, error: "INVALID_TOKEN", status: 401, message: credentials.message };
     }
-    return client.validateToken(token, { serviceSlug: options.serviceSlug });
+    return client.validateToken(credentials.token, { serviceSlug: options.serviceSlug, dpop: credentials.dpop });
   });
 }
 
 /**
- * Service health gate: checks this service's own DAYWALKER_API_KEY (not the caller's token) and
- * routes every request to `errorPath` while it is invalid, redirecting back once it heals.
+ * Service health gate: checks that this service's OAuth client credentials still get an access token
+ * covering its service (not the caller's token) and routes every request to `errorPath` while they don't,
+ * redirecting back once it heals.
  * It does NOT authenticate callers; use `createDaywalkerMiddleware` or `withDaywalkerAuth` for that.
  */
 export function createDaywalkerServiceHealthMiddleware(options: NextMiddlewareOptions = {}) {
   const client = options.client ?? daywalker;
-  return buildMiddleware(options, () => client.validateServiceKey({ serviceSlug: options.serviceSlug }));
+  return buildMiddleware(options, () => client.validateServiceCredentials({ serviceSlug: options.serviceSlug }));
 }
 
 function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request: Request) => Promise<ValidateResult>) {
@@ -254,9 +264,7 @@ function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request:
       pathname !== null &&
       (bypassPaths.some((path) => pathname === path || pathname.startsWith(`${path}/`)) || isStaticNormalized(pathname, matchesExtension))
     ) {
-      return (globalThis as any).NextResponse?.next
-        ? (globalThis as any).NextResponse.next()
-        : new Response(null, { headers: { "x-middleware-next": "1" } });
+      return continueResponse();
     }
 
     // 2. Authenticate (caller's token, or the service key for the health gate)
@@ -267,14 +275,10 @@ function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request:
       if (authResult.ok) {
         // Authorized again: heal/redirect back to home
         const redirectUrl = new URL(homePath, request.url);
-        return (globalThis as any).NextResponse?.redirect
-          ? (globalThis as any).NextResponse.redirect(redirectUrl)
-          : Response.redirect(redirectUrl.toString(), 307);
+        return redirectResponse(redirectUrl);
       }
       // Allow rendering the error page
-      return (globalThis as any).NextResponse?.next
-        ? (globalThis as any).NextResponse.next()
-        : new Response(null, { headers: { "x-middleware-next": "1" } });
+      return continueResponse();
     }
 
     // 4. Handle invalid token for all other routes
@@ -294,7 +298,7 @@ function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request:
               "Content-Type": "application/json",
               "Access-Control-Allow-Origin": "*",
               "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-              "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Token",
+              "Access-Control-Allow-Headers": "Content-Type, Authorization, DPoP, X-Api-Token",
               ...(failure.retryAfter ? { "Retry-After": String(failure.retryAfter) } : {}),
             },
           }
@@ -303,9 +307,7 @@ function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request:
 
       // If user only wanted API protection, allow web routes through
       if (options.protectApiOnly) {
-        return (globalThis as any).NextResponse?.next
-          ? (globalThis as any).NextResponse.next()
-          : new Response(null, { headers: { "x-middleware-next": "1" } });
+        return continueResponse();
       }
 
       // Web UI routes: redirect to diagnostic service error screen. Only a fixed error code and
@@ -322,14 +324,10 @@ function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request:
         }
       }
 
-      return (globalThis as any).NextResponse?.redirect
-        ? (globalThis as any).NextResponse.redirect(redirectUrl)
-        : Response.redirect(redirectUrl.toString(), 307);
+      return redirectResponse(redirectUrl);
     }
 
-    return (globalThis as any).NextResponse?.next
-      ? (globalThis as any).NextResponse.next()
-      : new Response(null, { headers: { "x-middleware-next": "1" } });
+    return continueResponse();
   };
 }
 
@@ -359,15 +357,12 @@ export function withDaywalkerAuth<Context extends Record<string, unknown> = Reco
     !(clientOrOptions instanceof Daywalker) ? clientOrOptions?.serviceSlug : undefined;
 
   return async function daywalkerAuthHandler(req: Request, context?: Context): Promise<Response> {
-    const token = extractToken(req);
-    if (!token) {
-      return Response.json(
-        { error: "INVALID_TOKEN", message: "Missing Authorization header or x-api-token" },
-        { status: 401 }
-      );
+    const credentials = credentialsOf(req);
+    if (!credentials.ok) {
+      return Response.json({ error: "INVALID_TOKEN", message: credentials.message }, { status: 401 });
     }
 
-    const result = await client.validateToken(token, { serviceSlug });
+    const result = await client.validateToken(credentials.token, { serviceSlug, dpop: credentials.dpop });
     if (!result.ok) {
       const { status, ...body } = toAuthFailureResponse(result);
       return Response.json(body, {

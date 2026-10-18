@@ -16,21 +16,22 @@ import {
   type ReplayStore,
 } from "../src/index.js";
 import { normalizePath, splitRequestTarget } from "../src/crypto/signatures.js";
+import { withOAuth, type TokenRequestLog } from "./helpers/oauth.js";
 
 type MockFetch = (url: string, init: RequestInit) => Promise<Response>;
 const env = {};
 const client = (fetch: MockFetch, extra: Record<string, unknown> = {}) =>
-  new Daywalker({ env, apiKey: "srv_live_service_key", serviceSlug: "svc", fetch: fetch as typeof globalThis.fetch, ...extra });
+  new Daywalker({ env, apiKey: "srv_live_service_key", serviceSlug: "svc", fetch: withOAuth(fetch as typeof globalThis.fetch), ...extra });
 
 describe("Online validation fails closed", () => {
   for (const [name, res] of [
     ["a 200 HTML page", () => new Response("<html>captive portal</html>", { status: 200 })],
     ["a 200 empty object", () => Response.json({})],
-    ["a 200 array", () => Response.json([{ valid: true }])],
+    ["a 200 array", () => Response.json([{ valid: true, serviceSlug: "svc" }])],
     ["valid: 'true' (string)", () => Response.json({ valid: "true", tenantId: "t" })],
-    ["valid: true with a bad rateLimit", () => Response.json({ valid: true, rateLimit: "lots" })],
-    ["valid: true with a non-string tenantId", () => Response.json({ valid: true, tenantId: { admin: true } })],
-    ["valid: true with array data", () => Response.json({ valid: true, data: [] })],
+    ["valid: true with a bad rateLimit", () => Response.json({ valid: true, serviceSlug: "svc", rateLimit: "lots" })],
+    ["valid: true with a non-string tenantId", () => Response.json({ valid: true, serviceSlug: "svc", tenantId: { admin: true } })],
+    ["valid: true with array data", () => Response.json({ valid: true, serviceSlug: "svc", data: [] })],
   ] as const) {
     it(`rejects ${name} with SERVICE_UNAVAILABLE and never caches it`, async () => {
       let calls = 0;
@@ -75,7 +76,7 @@ describe("Online validation fails closed", () => {
 
   it("hands every caller its own copy of a cached result", async () => {
     let calls = 0;
-    const dw = client(async () => (calls++, Response.json({ valid: true, tenantId: "t1", rateLimit: { limit: 5, remaining: 4, reset: 1 } })));
+    const dw = client(async () => (calls++, Response.json({ valid: true, serviceSlug: "svc", tenantId: "t1", rateLimit: { limit: 5, remaining: 4, reset: 1 } })));
     const [a, b] = await Promise.all([dw.validateToken("tok"), dw.validateToken("tok")]);
     assert.ok(a.ok && b.ok);
     assert.notStrictEqual(a, b);
@@ -389,8 +390,11 @@ describe("fetch() bodies and headers", () => {
     await dw.fetch("/x", { headers: { Authorization: "Bearer caller-token" } });
     await dw.fetch("/x");
     assert.strictEqual(seen[0].headers.get("authorization"), "Bearer caller-token");
-    assert.strictEqual(seen[1].headers.get("authorization"), "Bearer srv_live_service_key");
+    assert.match(seen[1].headers.get("authorization")!, /^DPoP ey/);
+    assert.ok(seen[1].headers.has("dpop"));
     assert.ok(seen[0].headers.has("signature"));
+    // The API key only ever reaches the token endpoint.
+    assert.ok(seen.every((r) => !String(r.headers.get("authorization")).includes("srv_live_service_key")));
   });
 });
 
@@ -405,7 +409,7 @@ describe("Keys, rotation and JWT strictness", () => {
   const now = Math.floor(Date.now() / 1000);
   const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const jwt = (key: crypto.KeyObject, header: Record<string, unknown>, payload: Record<string, unknown> = { aud: "svc", exp: now + 600 }) => {
-    const h = enc({ alg: "EdDSA", typ: "JWT", ...header });
+    const h = enc({ alg: "EdDSA", typ: "at+jwt", ...header });
     const p = enc({ jti: "j1", iss: "https://auth.daywalker.dev", ...payload });
     return `${h}.${p}.${crypto.sign(null, Buffer.from(`${h}.${p}`), key).toString("base64url")}`;
   };
@@ -422,7 +426,7 @@ describe("Keys, rotation and JWT strictness", () => {
     assert.strictEqual((await verify(jwt(a.privateKey, { kid: "other" }), { keys: [a.jwk] })).valid, true);
     assert.strictEqual((await loadPublicKey(JSON.stringify(jwks), "key-b")).publicJwk.x, b.jwk.x);
 
-    const client = new Daywalker({ env, serviceSlug: "svc", daywalkerPublicKey: JSON.stringify(jwks), fetch: async () => Response.json({}) });
+    const client = new Daywalker({ env, serviceSlug: "svc", daywalkerPublicKey: JSON.stringify(jwks), fetch: withOAuth(async () => Response.json({})) });
     assert.strictEqual((await client.validateToken({ token: jwt(b.privateKey, { kid: "key-b" }), offlineOnly: true })).ok, true);
   });
 
@@ -452,5 +456,65 @@ describe("Keys, rotation and JWT strictness", () => {
     const broken = new Daywalker({ env, signingKey: current, previousSigningKey: "not-a-key" });
     assert.deepStrictEqual((await broken.keys()).keys.map((k) => k.kid), [current.publicJwk.kid]);
     assert.ok((await broken.selfCheck()).problems.some((p) => /Previous signing key/.test(p)));
+  });
+});
+
+describe("OAuth access tokens instead of the API key", () => {
+  it("sends the API key only on the client credentials grant, never on refresh or other calls", async () => {
+    const log: TokenRequestLog[] = [];
+    const seen: Headers[] = [];
+    const fetch = withOAuth(async (_u, init) => (seen.push(new Headers(init?.headers)), Response.json({})), { log });
+    const dw = new Daywalker({ env, apiKey: "srv_live_service_key", serviceSlug: "svc", fetch });
+    await dw.getTokens();
+    await dw.refreshTokens();
+    await dw.fetch("/api/v1/services");
+    assert.deepStrictEqual(log.map((r) => [r.grantType, r.authorization]), [["client_credentials", "Bearer srv_live_service_key"], ["refresh_token", null]]);
+    assert.ok(log.every((r) => r.dpop));
+    assert.match(seen[0].get("authorization")!, /^DPoP /);
+  });
+
+  it("refreshes and retries once on 401 ACCESS_TOKEN_EXPIRED", async () => {
+    const log: TokenRequestLog[] = [];
+    const auths: string[] = [];
+    const dw = new Daywalker({
+      env,
+      apiKey: "srv_live_service_key",
+      serviceSlug: "svc",
+      fetch: withOAuth(async (_u, init) => {
+        auths.push(new Headers(init?.headers).get("authorization")!);
+        return auths.length === 1
+          ? Response.json({ error: "ACCESS_TOKEN_EXPIRED", message: "expired" }, { status: 401 })
+          : Response.json({ valid: true, serviceSlug: "svc", tenantId: "t" });
+      }, { log }),
+    });
+    assert.strictEqual((await dw.validateToken("tok")).ok, true);
+    assert.strictEqual(auths.length, 2);
+    assert.notStrictEqual(auths[0], auths[1]);
+    assert.deepStrictEqual(log.map((r) => r.grantType), ["client_credentials", "refresh_token"]);
+  });
+
+  it("reports a failed client credentials grant as 503 (never a 401 for the caller's token), and a missing API key as 500", async () => {
+    let validateCalls = 0;
+    const rejected = new Daywalker({
+      env,
+      apiKey: "srv_live_revoked",
+      serviceSlug: "svc",
+      fetch: withOAuth(async () => (validateCalls++, Response.json({ valid: true, serviceSlug: "svc" })), {
+        tokenResponse: () => Response.json({ error: "invalid_client", code: "INVALID_API_KEY", message: "bad key" }, { status: 401 }),
+      }),
+    });
+    const res = await rejected.validateToken("tok");
+    assert.strictEqual(res.ok, false);
+    if (!res.ok) {
+      assert.strictEqual(res.status, 503);
+      assert.strictEqual(res.error, "SERVICE_UNAVAILABLE");
+      assert.match(res.message, /INVALID_API_KEY/);
+    }
+    assert.strictEqual(validateCalls, 0);
+    assert.strictEqual((await rejected.validateServiceCredentials()).ok, false);
+
+    const unconfigured = new Daywalker({ env, serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true, serviceSlug: "svc" })) });
+    const missing = await unconfigured.validateToken("tok");
+    assert.deepStrictEqual(missing.ok ? null : [missing.status, missing.error], [500, "CONFIGURATION_ERROR"]);
   });
 });
