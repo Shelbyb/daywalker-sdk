@@ -16,6 +16,8 @@ export interface ResolvedConfig {
   /** "auto": offline verification keys come from `${authUrl}/.well-known/jwks.json` (env DAYWALKER_JWKS). */
   jwks: "auto" | null;
   leaseIssuer: string | null;
+  /** Ephemeral signing keys, when enabled: their lifetime and this process's key slot (null = random). */
+  ephemeralKey: { ttlSeconds: number; instanceId: string | null } | null;
   /** Origin clients use to reach this service, for DPoP `htu` checks (env DAYWALKER_PUBLIC_ORIGIN). */
   publicOrigin: string | null;
   authUrl: string;
@@ -27,6 +29,9 @@ export interface ResolvedConfig {
   timeoutMs: number;
   problems: string[];
 }
+
+/** Default lifetime of an ephemeral signing key (6 hours); it is replaced when a quarter of that is left. */
+export const DEFAULT_EPHEMERAL_KEY_TTL_SECONDS = 21_600;
 
 /** Default per-attempt timeout for requests to Daywalker Auth. */
 export const DEFAULT_TIMEOUT_MS = 5_000;
@@ -146,6 +151,21 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const jwks = rawJwks === "auto" ? "auto" : null;
   if (rawJwks && rawJwks !== "auto" && rawJwks !== "off") problems.push(`DAYWALKER_JWKS must be "auto" or "off" (got "${rawJwks.slice(0, 40)}"); JWKS fetching is off`);
   const leaseIssuer = (options.leaseIssuer ?? env.DAYWALKER_LEASE_ISSUER ?? "").trim() || null;
+  let ephemeralKey: ResolvedConfig["ephemeralKey"] = null;
+  const ephemeralOption = options.ephemeralKey ?? (/^(1|true|yes)$/i.test(env.DAYWALKER_EPHEMERAL_KEY ?? "") ? true : undefined);
+  if (ephemeralOption) {
+    const o = typeof ephemeralOption === "object" ? ephemeralOption : {};
+    const ttlSeconds = o.ttlSeconds ?? (env.DAYWALKER_KEY_TTL_SECONDS ? Number(env.DAYWALKER_KEY_TTL_SECONDS) : DEFAULT_EPHEMERAL_KEY_TTL_SECONDS);
+    if (!Number.isInteger(ttlSeconds) || ttlSeconds < 3_600 || ttlSeconds > 2_592_000) {
+      throw new Error(`ephemeralKey.ttlSeconds must be a whole number of seconds from 3600 to 2592000 (got ${ttlSeconds})`);
+    }
+    const instanceId = (o.instanceId ?? env.DAYWALKER_INSTANCE_ID ?? "").trim() || null;
+    if (instanceId !== null && !/^[A-Za-z0-9_.-]{1,64}$/.test(instanceId)) {
+      throw new Error("ephemeralKey.instanceId must be 1-64 of A-Z a-z 0-9 . _ -");
+    }
+    ephemeralKey = { ttlSeconds, instanceId };
+  }
+
   const rawPublicOrigin = (options.publicOrigin ?? env.DAYWALKER_PUBLIC_ORIGIN ?? "").trim();
   let publicOrigin: string | null = null;
   if (rawPublicOrigin) {
@@ -179,6 +199,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     daywalkerPublicKey,
     jwks,
     leaseIssuer,
+    ephemeralKey,
     publicOrigin,
     authUrl,
     cacheTtlMs,

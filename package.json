@@ -26,6 +26,16 @@
       "import": "./dist/express.js",
       "default": "./dist/express.js"
     },
+    "./keystore": {
+      "types": "./dist/keystore/index.d.ts",
+      "import": "./dist/keystore/index.js",
+      "default": "./dist/keystore/index.js"
+    },
+    "./keystore/file": {
+      "types": "./dist/keystore/file.d.ts",
+      "import": "./dist/keystore/file.js",
+      "default": "./dist/keystore/file.js"
+    },
     "./flags": {
       "types": "./dist/flags/client.d.ts",
       "import": "./dist/flags/client.js",
