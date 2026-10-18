@@ -20,6 +20,7 @@ export const webcrypto = Object.freeze({
   digest: capture(subtleRef, "digest"),
   sign: capture(subtleRef, "sign"),
   verify: capture(subtleRef, "verify"),
+  decrypt: capture(subtleRef, "decrypt"),
   importKey: capture(subtleRef, "importKey"),
   exportKey: capture(subtleRef, "exportKey"),
   generateKey: capture(subtleRef, "generateKey"),

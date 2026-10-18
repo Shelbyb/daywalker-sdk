@@ -248,6 +248,33 @@ export interface TokenSet {
   jwksUri?: string;
 }
 
+/** A service's license key from Daywalker: derived per service, signing key and one-hour window. */
+export interface License {
+  serviceSlug: string;
+  /** 64 hex characters (32 bytes). A secret: never log it or send it anywhere. */
+  licenseKey: string;
+  /** ISO 8601: the end of the window the key is valid for. */
+  expiresAt: string;
+}
+
+/** The config bundle Daywalker seals under the license key. Fields beyond these are passed through. */
+export interface ConfigBundle {
+  serviceSlug: string;
+  /** Random per issue; derive per-process secrets from it (and the license key), never store it. */
+  dataKeySalt: string;
+  features: { exclusiveTier?: boolean; stage?: string; rateLimitPerMinute?: number | null; rateLimitPerHour?: number | null; [key: string]: unknown };
+  issuedAt: string;
+  expiresAt: string;
+  [key: string]: unknown;
+}
+
+export interface LicenseOptions {
+  /** Default: the configured service slug. */
+  serviceSlug?: string;
+  /** Ignore the cached license and start a new client credentials grant. */
+  forceRefresh?: boolean;
+}
+
 export interface GetTokensOptions {
   /** Narrow the grant to these service slugs (least privilege); default: every service the credentials cover. */
   scope?: string[];

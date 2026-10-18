@@ -21,6 +21,8 @@ import {
   randomInstanceId,
   calculateJwkThumbprint,
   base64UrlToBytes,
+  base64ToBytes,
+  hexToBytes,
   utf8ToString,
   type DpopKey,
 } from "./crypto/index.js";
@@ -38,6 +40,9 @@ import {
   type StoredSigningKey,
   type TokenSet,
   type GetTokensOptions,
+  type License,
+  type LicenseOptions,
+  type ConfigBundle,
   type PublicJwk,
   type PublicJwks,
   type RateLimitWindow,
@@ -1346,6 +1351,7 @@ export class Daywalker {
       ? Array.from(new Set(json.services.filter((x): x is string => typeof x === "string" && SERVICE_SLUG_PATTERN.test(x.toLowerCase())).map((x) => x.toLowerCase())))
       : [];
     const refreshExpiresIn = Math.max(0, Math.floor(Number(json.refresh_expires_in) || 0));
+    this.#rememberLicenses(json, services);
     return deepFreeze({
       accessToken: json.access_token,
       refreshToken: json.refresh_token,
@@ -1430,6 +1436,115 @@ export class Daywalker {
       });
     }
     return (await this.#tokenFlight).accessToken;
+  }
+
+  /** Licenses from the client credentials grant, by service slug. Kept out of TokenSet so they are never serialized. */
+  #licenses = new Map<string, License>();
+
+  #rememberLicenses(json: Record<string, unknown>, services: string[]): void {
+    const found = new Map<string, License>();
+    const add = (slug: string, key: unknown, expires: unknown) => {
+      if (typeof key !== "string" || !/^[0-9a-f]{64}$/i.test(key) || typeof expires !== "string" || !Number.isFinite(Date.parse(expires))) return;
+      if (!SERVICE_SLUG_PATTERN.test(slug)) return;
+      found.set(slug, { serviceSlug: slug, licenseKey: key.toLowerCase(), expiresAt: expires });
+    };
+    if (json.licenses && typeof json.licenses === "object") {
+      for (const [slug, v] of Object.entries(json.licenses as Record<string, any>)) add(slug.toLowerCase(), v?.licenseKey, v?.expiresAt);
+    }
+    const primary = services[0];
+    if (primary && !found.has(primary)) add(primary, json.licenseKey ?? json.license_key, json.licenseExpiresAt ?? json.license_expires_at);
+    // A refresh carries no licenses; keep the ones we hold until they expire.
+    for (const [slug, license] of found) this.#licenses.set(slug, license);
+  }
+
+  #licenseCached(slug: string): License | null {
+    const license = this.#licenses.get(slug);
+    // A minute of margin so a key never expires between fetching it and using it.
+    return license && Date.parse(license.expiresAt) - 60_000 > Date.now() ? license : null;
+  }
+
+  /**
+   * The service's license key from Daywalker (issued with the client credentials grant, valid for one hour,
+   * cached in memory until a minute before it expires). A revoked or suspended service gets no license: this
+   * throws the DaywalkerAuthError Daywalker answered with (`SERVICE_REVOKED`, `SERVICE_SUSPENDED`,
+   * `DOMAIN_REVOKED`, ...). `LICENSE_UNAVAILABLE` (403) means Daywalker granted the service without a license.
+   * Never log the key.
+   */
+  public async getLicense(options: LicenseOptions = {}): Promise<License> {
+    const slug = String(options.serviceSlug ?? this.#config.serviceSlug ?? "").toLowerCase();
+    if (!slug || !SERVICE_SLUG_PATTERN.test(slug)) {
+      throw new DaywalkerAuthError("getLicense: a valid serviceSlug is required", 500, "CONFIGURATION_ERROR");
+    }
+    if (options.forceRefresh !== true) {
+      await this.accessToken();
+      const cached = this.#licenseCached(slug);
+      if (cached) return { ...cached };
+    }
+    const tokens = await this.getTokens();
+    if (!tokens.services.includes(slug)) {
+      throw new DaywalkerAuthError(`The OAuth client credentials don't cover ${slug}`, 403, "SERVICE_NOT_GRANTED");
+    }
+    const license = this.#licenseCached(slug);
+    if (!license) throw new DaywalkerAuthError(`Daywalker Auth issued no license for ${slug}`, 403, "LICENSE_UNAVAILABLE");
+    return { ...license };
+  }
+
+  /**
+   * Fetches the config bundle (`POST /api/v1/services/:slug/bundle`) and opens it with the license key
+   * (AES-256-GCM). The bundle can only be read by a client that got the license from Daywalker. At a window
+   * rollover the key is refreshed once and the bundle opened again. Cached until shortly before it expires.
+   */
+  public async fetchBundle(options: LicenseOptions = {}): Promise<ConfigBundle> {
+    const slug = String(options.serviceSlug ?? this.#config.serviceSlug ?? "").toLowerCase();
+    if (!slug || !SERVICE_SLUG_PATTERN.test(slug)) {
+      throw new DaywalkerAuthError("fetchBundle: a valid serviceSlug is required", 500, "CONFIGURATION_ERROR");
+    }
+    const cached = options.forceRefresh === true ? undefined : this.#bundles.get(slug);
+    if (cached && Date.parse(cached.expiresAt) - 60_000 > Date.now()) return structuredClone(cached);
+    let license = await this.getLicense(options);
+    for (let attempt = 0; ; attempt++) {
+      const res = await this.fetch(`/api/v1/services/${slug}/bundle`, { method: "POST", body: {} });
+      const json = await readJsonObject(res, this.#config.timeoutMs);
+      const str = (v: unknown) => (typeof v === "string" ? v.slice(0, 500) : undefined);
+      if (res.status !== 200) {
+        throw new DaywalkerAuthError(
+          redactSecrets(str(json.message) ?? str(json.error) ?? `Bundle request failed with HTTP ${res.status}`),
+          res.status,
+          str(json.code) ?? str(json.error)
+        );
+      }
+      const sealed = json.bundle as Record<string, unknown> | undefined;
+      if (!sealed || typeof sealed.iv !== "string" || typeof sealed.tag !== "string" || typeof sealed.ciphertext !== "string") {
+        throw new DaywalkerAuthError("Daywalker Auth returned a malformed bundle", 502, "SERVICE_UNAVAILABLE");
+      }
+      let bundle: ConfigBundle | null = null;
+      try {
+        bundle = await this.#openBundle(license.licenseKey, sealed as { iv: string; tag: string; ciphertext: string }, slug);
+      } catch {
+        bundle = null;
+      }
+      if (bundle) {
+        this.#bundles.set(slug, bundle);
+        return structuredClone(bundle);
+      }
+      if (attempt >= 1) throw new DaywalkerAuthError("The bundle could not be opened with the license key", 502, "BUNDLE_UNREADABLE");
+      license = await this.getLicense({ ...options, forceRefresh: true });
+    }
+  }
+
+  #bundles = new Map<string, ConfigBundle>();
+
+  async #openBundle(licenseKey: string, sealed: { iv: string; tag: string; ciphertext: string }, slug: string): Promise<ConfigBundle> {
+    const key = await webcrypto.importKey("raw", hexToBytes(licenseKey) as BufferSource, { name: "AES-GCM" }, false, ["decrypt"]);
+    const tag = base64ToBytes(sealed.tag);
+    const data = base64ToBytes(sealed.ciphertext);
+    const joined = new Uint8Array(data.length + tag.length);
+    joined.set(data);
+    joined.set(tag, data.length);
+    const plain = await webcrypto.decrypt({ name: "AES-GCM", iv: base64ToBytes(sealed.iv) as BufferSource, tagLength: 128 }, key, joined as BufferSource);
+    const parsed = JSON.parse(utf8ToString(new Uint8Array(plain))) as ConfigBundle;
+    if (!parsed || typeof parsed !== "object" || parsed.serviceSlug !== slug || typeof parsed.dataKeySalt !== "string") throw new Error("bad bundle");
+    return deepFreeze(parsed);
   }
 
   /**
