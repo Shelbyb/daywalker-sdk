@@ -40,6 +40,7 @@ export {
   signRequest,
   verifyRequestSignature,
   verifyJwtLease,
+  leaseServices,
   registerPublicKey,
 } from "./signatures.js";
 
