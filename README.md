@@ -57,6 +57,61 @@ DAYWALKER_API_KEY=srv_live_... npx daywalker init --service my-service-slug --do
 
 The private key is never printed unless you pass `--print-key`.
 
+### Or: provision the key automatically
+
+Instead of running `init` and copying `DAYWALKER_SIGNING_KEY` into every environment, give the client a **key store**. On first use it loads the key from the store, or generates one, registers it for the service's domain (`POST /api/v1/keys/register`, with `DAYWALKER_API_KEY`) and saves it:
+
+```ts
+import { Daywalker } from "@shelbyb/daywalker-sdk";
+import { fileKeyStore } from "@shelbyb/daywalker-sdk/keystore/file";
+
+const client = new Daywalker({
+  keyStore: fileKeyStore(), // .daywalker/signing-key.json (0600, in a 0700 directory)
+});
+await client.provisionSigningKey(); // optional: provision at startup and fail fast, instead of on the first request
+```
+
+All you need is `DAYWALKER_API_KEY` and a domain. The domain is detected from `VERCEL_PROJECT_PRODUCTION_URL`, `RAILWAY_PUBLIC_DOMAIN`, `RENDER_EXTERNAL_HOSTNAME`, `APP_URL` and similar; set `DAYWALKER_DOMAIN` elsewhere.
+
+| Store | Import | Use it for |
+|---|---|---|
+| `fileKeyStore({ path? })` | `@shelbyb/daywalker-sdk/keystore/file` | VMs and containers with a persistent volume (Node.js). Atomic create-if-absent; refuses symlinks and files others can read |
+| `memoryKeyStore()` | `@shelbyb/daywalker-sdk/keystore` | Tests and single long-lived processes: every new process registers a new key |
+| `envKeyStore(env?)` | `@shelbyb/daywalker-sdk/keystore` | Read-only: the key `daywalker init` wrote to the environment |
+| your own | — | Serverless and several instances: any shared store with an atomic create-if-absent (Redis `SET key value NX`, Vercel / Cloudflare KV, a secrets manager) |
+
+A store is `{ load(), saveIfAbsent?(record) }`. `saveIfAbsent` must be atomic: when several instances start at once, exactly one save wins and the others load the winner's key. Each of them may already have registered its own key, so the SDK warns with the id of the unused one to revoke in the dashboard.
+
+```ts
+const redisKeyStore = (redis) => ({
+  load: async () => JSON.parse((await redis.get("daywalker:signing-key")) ?? "null"),
+  saveIfAbsent: async (record) => (await redis.set("daywalker:signing-key", JSON.stringify(record), { NX: true })) === "OK",
+});
+```
+
+Safeguards:
+- Only keys this process generated **and registered** are ever saved, so a key planted in the store is never registered with your API key.
+- A stored key is checked against its `keyId` (RFC 7638 thumbprint) and domain on every load, and imported non-extractable.
+- `selfCheck()` / `npx daywalker check --offline` only read the store; they never provision.
+
+Treat the store like any secret: it holds the private key. `DAYWALKER_SIGNING_KEY` and `signer` take precedence over `keyStore`.
+
+### Or: keep the key in a KMS (no private key in the app at all)
+
+Pass a `signer` and the SDK never sees the private key. Every RFC 9421 signature is made by your KMS or HSM. `sign` receives the signature base and must return the raw 64-byte Ed25519 signature:
+
+```ts
+const client = new Daywalker({
+  signer: {
+    keyId: "kms-ed25519-2026-10", // the id you registered the key under
+    publicJwk,                    // optional but recommended: the SDK checks the signer against it once before any request
+    sign: async (data) => yourKms.signEd25519(KMS_KEY_ID, data), // must resolve to the raw 64-byte signature (Uint8Array)
+  },
+});
+```
+
+Your KMS must support Ed25519 (pure EdDSA over the message, not a pre-hashed variant). Register the KMS public key once with `registerPublicKey({ apiKey, domain, publicJwk })`. The signer is captured at construction, so changing the object later has no effect.
+
 ---
 
 ## Environment
@@ -65,10 +120,10 @@ The private key is never printed unless you pass `--print-key`.
 |---|---|---|
 | `DAYWALKER_API_KEY` | ✅ | The service's OAuth client credential (`srv_live_…`). It is sent only to `POST /api/v1/oauth/token` (client credentials grant, together with the signing key) and to `POST /api/v1/keys/register` by `daywalker init` / `rotate`. Every other call uses an access token. See [Authentication](#authentication-oauth-20-client-credentials) |
 | `DAYWALKER_SERVICE_SLUG` | ✅ | The service slug to validate against (e.g. `sonalyze`). One API key can cover several services: a comma-separated list (`gigpulse,devpulse`) is accepted and the first is the default. See [One API key, several services](#one-api-key-several-services) |
-| `DAYWALKER_SIGNING_KEY` | for signed requests | Ed25519 private key from `daywalker init` (PKCS#8 Base64 DER or PEM) |
+| `DAYWALKER_SIGNING_KEY` | for signed requests | Ed25519 private key from `daywalker init` (PKCS#8 Base64 DER or PEM). Not needed with a `keyStore` (auto-provisioning) or a `signer` (KMS); see [Setup](#setup-once-per-service) |
 | `DAYWALKER_KEY_ID` | optional | RFC 7638 JWK thumbprint derived during key generation |
 | `DAYWALKER_SIGNING_KEY_PREVIOUS` | during rotation | Previous private key, maintained during deployment transitions |
-| `DAYWALKER_DOMAIN` | optional | Optional caller identifier or host domain name |
+| `DAYWALKER_DOMAIN` | when not detected | The service's public domain: the key is registered for it. Detected from your platform's URL variables when unset |
 | `DAYWALKER_PUBLIC_KEY` | optional | Daywalker Auth public key for zero-egress offline JWT lease verification |
 | `DAYWALKER_JWKS` | optional | `auto` verifies access tokens offline against Daywalker's JWKS, fetched from `${DAYWALKER_AUTH_URL}/.well-known/jwks.json` and cached, so signing-key rotation needs no redeploy. Default `off`. See [Zero-Egress Offline Verification](#zero-egress-offline-verification) |
 | `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev`; must be `https://` (except localhost) |

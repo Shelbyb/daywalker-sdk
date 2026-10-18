@@ -347,3 +347,19 @@ export async function loadPublicKey(
     throw new Error(`Failed to import public key: ${(err as Error).message}`);
   }
 }
+
+/**
+ * Imports a PKCS#8 (base64) Ed25519 private key for signing only, as a NON-extractable CryptoKey: once
+ * imported, nothing in the process (including this SDK) can export it again. The public JWK is derived first.
+ */
+export async function importSigningKey(pkcs8Base64: string): Promise<SigningKey> {
+  const derived = await loadSigningKey(pkcs8Base64);
+  const privateKey = await webcrypto.importKey(
+    "pkcs8",
+    base64ToBytes(pkcs8Base64) as unknown as BufferSource,
+    "Ed25519",
+    false,
+    ["sign"]
+  );
+  return { privateKey, publicKey: derived.publicKey, publicJwk: derived.publicJwk };
+}
