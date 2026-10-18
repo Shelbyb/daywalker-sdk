@@ -1,4 +1,5 @@
 import { parseServiceSlugs, resolveConfig, type ResolvedConfig } from "./config.js";
+import { API_KEY_PATTERN, SERVICE_SLUG_PATTERN } from "./crypto/signatures.js";
 import {
   loadSigningKey,
   loadPublicKey,
@@ -10,16 +11,24 @@ import {
   sha256Base64Url,
   generateDpopKey,
   createDpopProof,
+  verifyDpopProof,
+  base64UrlToBytes,
+  utf8ToString,
   type DpopKey,
 } from "./crypto/index.js";
+import { webcrypto } from "./crypto/webcrypto.js";
 import {
   DaywalkerAuthError,
   DaywalkerError,
   DaywalkerRateLimitError,
   type DaywalkerConfig,
+  type IncomingDpop,
+  type ReplayStore,
+  type ValidateTokenOptions,
   type TokenSet,
   type GetTokensOptions,
   type PublicJwk,
+  type PublicJwks,
   type RateLimitWindow,
   type RetryOptions,
   type SelfCheckResult,
@@ -44,7 +53,7 @@ function parseRetryAfter(headerValue: string | null): number | undefined {
 
 function generateNonce(): string {
   const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
+  webcrypto.getRandomValues(bytes);
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -174,9 +183,40 @@ function attemptSignal(caller: AbortSignal | null | undefined, timeoutMs: number
   };
 }
 
-/** Reads a response body, giving up (and cancelling it) after `timeoutMs` so a trickling body can't hang us. */
+/**
+ * Reads a response body as text, giving up (and cancelling it) after `timeoutMs` so a trickling body can't
+ * hang us, and refusing bodies over `MAX_RESPONSE_BYTES` so a huge one can't exhaust memory.
+ */
 async function readText(res: Response, timeoutMs: number): Promise<string> {
-  if (!(timeoutMs > 0)) return res.text();
+  const declared = Number(res.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    res.body?.cancel().catch(() => {});
+    throw new DaywalkerError(`Daywalker Auth response is too large (${declared} bytes)`);
+  }
+  const read = async (): Promise<string> => {
+    if (!res.body) return res.text();
+    const reader = res.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        reader.cancel().catch(() => {});
+        throw new DaywalkerError(`Daywalker Auth response is larger than ${MAX_RESPONSE_BYTES} bytes`);
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const c of chunks) {
+      bytes.set(c, offset);
+      offset += c.byteLength;
+    }
+    return utf8ToString(bytes);
+  };
+  if (!(timeoutMs > 0)) return read();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
@@ -185,10 +225,22 @@ async function readText(res: Response, timeoutMs: number): Promise<string> {
     }, timeoutMs);
   });
   try {
-    return await Promise.race([res.text(), timeout]);
+    return await Promise.race([read(), timeout]);
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** A JSON object from a response body (bounded, with a timeout), or `{}` when it isn't one. */
+async function readJsonObject(res: Response, timeoutMs: number): Promise<Record<string, unknown>> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readText(res, timeoutMs));
+  } catch (err) {
+    if ((err as Error).name === "TimeoutError" || err instanceof DaywalkerError) throw err;
+    return {};
+  }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
 }
 
 function isRedirect(res: Response): boolean {
@@ -202,6 +254,40 @@ function redirectError(what: string, res: Response): DaywalkerError {
     res.status || undefined,
     "UNEXPECTED_REDIRECT"
   );
+}
+
+/**
+ * A failed client credentials grant or refresh as a validation result. Missing configuration is a 500;
+ * anything else (invalid_client, access_denied, an outage) is a 503, since it says nothing about the
+ * caller's token. Never cached.
+ */
+function credentialFailure(err: DaywalkerAuthError): ValidateResult {
+  if (err.code === "CONFIGURATION_ERROR") {
+    return { ok: false, error: "CONFIGURATION_ERROR", status: 500, message: err.message };
+  }
+  return {
+    ok: false,
+    error: "SERVICE_UNAVAILABLE",
+    status: 503,
+    message: redactSecrets(`Could not obtain an OAuth access token${err.code ? ` (${err.code})` : ""}: ${err.message}`),
+  };
+}
+
+/** The payload of a JWT this client was just issued over TLS; not verified, only read. */
+function decodeJwtClaims(jwt: string): Record<string, unknown> {
+  try {
+    const claims = JSON.parse(utf8ToString(base64UrlToBytes(jwt.split(".")[1] ?? "")));
+    return claims && typeof claims === "object" ? claims : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The `code` (else `error`) of a JSON error answer, read from a copy so the caller still gets the body. */
+async function errorCode(res: Response): Promise<string | undefined> {
+  const json = (await res.clone().json().catch(() => null)) as Record<string, unknown> | null;
+  const code = json?.code ?? json?.error;
+  return typeof code === "string" ? code : undefined;
 }
 
 function isRateLimitWindow(value: unknown): value is RateLimitWindow {
@@ -232,33 +318,134 @@ function cloneResult(result: ValidateResult): ValidateResult {
 }
 
 const DEFAULT_ISSUER = "https://auth.daywalker.dev";
+const TOKEN_PATH = "/api/v1/oauth/token";
+
+/**
+ * Longest a successful validation is cached (5 minutes), whatever `cacheTtlMs` says, so a revoked token
+ * can't stay accepted for long.
+ */
+export const MAX_CACHE_TTL_MS = 300_000;
+/** Longest incoming token accepted (characters); longer input is refused without calling Daywalker. */
+export const MAX_TOKEN_LENGTH = 8_192;
+/** Printable ASCII with no whitespace, quotes, commas or separators: anything else is not a token. */
+const TOKEN_PATTERN = /^[A-Za-z0-9._~+/=-]+$/;
+/** Access tokens are used for at most this long (seconds), whatever the token endpoint says. */
+const MAX_ACCESS_TOKEN_LIFETIME_SECONDS = 3_600;
+/** Largest response body read from Daywalker Auth. */
+const MAX_RESPONSE_BYTES = 1_048_576;
+
+/** How long a fetched JWKS (`jwks: "auto"`) is used before it is refetched. */
+export const JWKS_CACHE_TTL_MS = 600_000;
+/**
+ * Least time between two JWKS fetches, whatever triggers them (an unknown `kid`, an expired set, a failed
+ * fetch), so a flood of tokens naming made-up `kid`s costs at most one request to Daywalker per interval.
+ */
+export const JWKS_REFETCH_COOLDOWN_MS = 30_000;
+/** Keys looked at in a fetched JWKS; the rest are ignored. */
+const MAX_JWKS_KEYS = 16;
+/** An Ed25519 public key: 32 bytes, unpadded base64url. */
+const ED25519_X_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The keys of a fetched JWKS that can verify Daywalker access tokens: Ed25519 signing keys for EdDSA with a
+ * `kid`, copied to fresh objects with nothing else on them. Anything else (RSA, EC, `alg: "none"`, private
+ * key material, encryption keys) is dropped.
+ */
+function usableJwks(keys: unknown): PublicJwk[] {
+  if (!Array.isArray(keys)) return [];
+  const out: PublicJwk[] = [];
+  for (const k of keys.slice(0, MAX_JWKS_KEYS)) {
+    if (!k || typeof k !== "object") continue;
+    const j = k as Record<string, unknown>;
+    if (j.kty !== "OKP" || j.crv !== "Ed25519" || typeof j.x !== "string" || !ED25519_X_PATTERN.test(j.x)) continue;
+    if ((j.alg !== undefined && j.alg !== "EdDSA") || (j.use !== undefined && j.use !== "sig") || j.d !== undefined) continue;
+    if (typeof j.kid !== "string" || j.kid === "" || j.kid.length > 256) continue;
+    out.push({ kty: "OKP", crv: "Ed25519", x: j.x, kid: j.kid, use: "sig", alg: "EdDSA" });
+  }
+  return out;
+}
+
+/** The `kid` a JWT's (unverified) header names, used only to pick a key; undefined when there is none. */
+function jwtKid(token: string): string | undefined {
+  try {
+    const header = JSON.parse(utf8ToString(base64UrlToBytes(token.split(".")[0] ?? "")));
+    return header && typeof header === "object" && typeof header.kid === "string" ? header.kid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A copy of `value` that can't be changed: nested objects and arrays are frozen too. */
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+  }
+  return value;
+}
 
 export class Daywalker {
-  private readonly _config: ResolvedConfig;
-  private readonly _rawConfig: DaywalkerConfig;
-  private _signingKeyPromise?: Promise<SigningKey>;
-  private _previousSigningKeyPromise?: Promise<SigningKey>;
-  private readonly _cache = new Map<string, { result: ValidateResult; expiresAt: number }>();
-  private readonly _inflight = new Map<string, Promise<ValidateResult>>();
+  readonly #config: ResolvedConfig;
+  /** The secret-free, frozen view handed out by `config`. */
+  readonly #publicConfig: Readonly<ResolvedConfig>;
+  readonly #fetch: typeof fetch;
+  readonly #publicOrigin: string | null;
+  readonly #dpopReplayStore: ReplayStore | undefined;
+  #signingKeyPromise?: Promise<SigningKey>;
+  #previousSigningKeyPromise?: Promise<SigningKey>;
+  readonly #cache = new Map<string, { result: ValidateResult; expiresAt: number; jkt?: string }>();
+  readonly #inflight = new Map<string, Promise<ValidateResult>>();
+  /** The last JWKS fetched with usable keys (`jwks: "auto"`), kept when a later fetch fails. */
+  #jwks: { set: PublicJwks; fetchedAt: number } | null = null;
+  #jwksFlight: Promise<void> | null = null;
+  #jwksAttemptAt = -Infinity;
 
   constructor(config: DaywalkerConfig = {}) {
-    this._rawConfig = config;
-    this._config = resolveConfig(config);
+    // Everything is read once: changing the caller's config object later has no effect.
+    const resolved = resolveConfig(config);
+    resolved.cacheTtlMs = Math.max(0, Math.min(Number.isFinite(resolved.cacheTtlMs) ? resolved.cacheTtlMs : 0, MAX_CACHE_TTL_MS));
+    resolved.negativeCacheTtlMs = Math.max(0, Math.min(Number.isFinite(resolved.negativeCacheTtlMs) ? resolved.negativeCacheTtlMs : 0, MAX_CACHE_TTL_MS));
+    // Copies, so freezing never touches objects the caller still owns.
+    const copyKey = (k: string | SigningKey | null) => (k && typeof k === "object" ? { ...k, publicJwk: { ...k.publicJwk } } : k);
+    resolved.signingKey = copyKey(resolved.signingKey);
+    resolved.previousSigningKey = copyKey(resolved.previousSigningKey);
+    if (resolved.daywalkerPublicKey && typeof resolved.daywalkerPublicKey === "object") {
+      resolved.daywalkerPublicKey = JSON.parse(JSON.stringify(resolved.daywalkerPublicKey));
+    }
+    this.#config = deepFreeze(resolved);
+    this.#publicConfig = deepFreeze({
+      ...resolved,
+      serviceSlugs: [...resolved.serviceSlugs],
+      retry: { ...resolved.retry },
+      problems: [...resolved.problems],
+      apiKey: resolved.apiKey ? "[configured]" : null,
+      signingKey: resolved.signingKey ? "[configured]" : null,
+      previousSigningKey: resolved.previousSigningKey ? "[configured]" : null,
+    });
+    const doFetch = config.fetch ?? globalThis.fetch;
+    if (typeof doFetch !== "function") throw new DaywalkerError("No fetch implementation available: pass config.fetch");
+    this.#fetch = doFetch;
+    this.#publicOrigin = resolved.publicOrigin;
+    this.#dpopReplayStore = config.dpopReplayStore;
+    // Instances of this class (not subclasses, which may still add fields) can't gain or change properties.
+    if (new.target === Daywalker) Object.freeze(this);
   }
 
-  public get config(): ResolvedConfig {
-    return this._config;
+  /** The resolved configuration, frozen, with the API key and private keys shown as "[configured]". */
+  public get config(): Readonly<ResolvedConfig> {
+    return this.#publicConfig;
   }
 
   public toJSON(): Record<string, unknown> {
     return {
-      serviceSlug: this._config.serviceSlug,
-      domain: this._config.domain,
-      authUrl: this._config.authUrl,
-      keyId: this._config.keyId,
-      apiKey: maskSecret(this._config.apiKey),
-      signingKey: this._config.signingKey ? "[configured]" : null,
-      daywalkerPublicKey: this._config.daywalkerPublicKey ? "[configured]" : null,
+      serviceSlug: this.#config.serviceSlug,
+      domain: this.#config.domain,
+      authUrl: this.#config.authUrl,
+      keyId: this.#config.keyId,
+      apiKey: maskSecret(this.#config.apiKey),
+      signingKey: this.#config.signingKey ? "[configured]" : null,
+      daywalkerPublicKey: this.#config.daywalkerPublicKey ? "[configured]" : null,
+      jwks: this.#config.jwks,
     };
   }
 
@@ -267,31 +454,31 @@ export class Daywalker {
     return this.toJSON();
   }
 
-  private async getLoadedSigningKey(): Promise<SigningKey | null> {
-    if (!this._config.signingKey) return null;
-    if (typeof this._config.signingKey !== "string" && "privateKey" in this._config.signingKey) {
-      return this._config.signingKey;
+  async #getLoadedSigningKey(): Promise<SigningKey | null> {
+    if (!this.#config.signingKey) return null;
+    if (typeof this.#config.signingKey !== "string" && "privateKey" in this.#config.signingKey) {
+      return this.#config.signingKey;
     }
-    if (!this._signingKeyPromise) {
-      this._signingKeyPromise = loadSigningKey(this._config.signingKey as string);
+    if (!this.#signingKeyPromise) {
+      this.#signingKeyPromise = loadSigningKey(this.#config.signingKey as string);
     }
-    return this._signingKeyPromise;
+    return this.#signingKeyPromise;
   }
 
-  private _dpopKey: Promise<DpopKey> | null = null;
+  #dpopKey: Promise<DpopKey> | null = null;
 
   /** The client's DPoP key, generated on first use. Issued tokens are bound to it for this client's life. */
-  private getDpopKey(): Promise<DpopKey> {
-    return (this._dpopKey ??= generateDpopKey());
+  #getDpopKey(): Promise<DpopKey> {
+    return (this.#dpopKey ??= generateDpopKey());
   }
 
-  private async getLoadedPreviousSigningKey(): Promise<SigningKey | null> {
-    const raw = this._config.previousSigningKey;
+  async #getLoadedPreviousSigningKey(): Promise<SigningKey | null> {
+    const raw = this.#config.previousSigningKey;
     if (!raw) return null;
-    if (!this._previousSigningKeyPromise) {
-      this._previousSigningKeyPromise = loadSigningKey(raw);
+    if (!this.#previousSigningKeyPromise) {
+      this.#previousSigningKeyPromise = loadSigningKey(raw);
     }
-    return this._previousSigningKeyPromise;
+    return this.#previousSigningKeyPromise;
   }
 
   /**
@@ -303,25 +490,28 @@ export class Daywalker {
    * - 429s are retried with exponential backoff, honoring `Retry-After` up to `retry.maxRetryAfterMs`. Network
    *   errors and timeouts are retried only for GET / HEAD / OPTIONS, with an `idempotencyKey`, or when
    *   `retry.retryNetworkErrors` is true. Options merge as defaults < `config.retry` < `init.retry`.
-   * - An explicit `Authorization` header is sent as given; otherwise `Bearer <apiKey>` is added. The signature
-   *   covers method, path, query, authority and Content-Digest, never Authorization.
+   * - An explicit `Authorization` header is sent as given; otherwise `DPoP <access token>` from the OAuth
+   *   client credentials flow (`accessToken()`) is added, with a DPoP proof bound to it. The API key is never
+   *   sent here: it only authenticates the client credentials grant. An answer of 401 ACCESS_TOKEN_EXPIRED
+   *   refreshes the token and retries once. The signature covers method, path, query, authority and
+   *   Content-Digest, never Authorization.
    */
   public async fetch(
     path: string,
     init?: DaywalkerFetchInit
   ): Promise<Response> {
-    const authUrl = this._config.authUrl;
+    const authUrl = this.#config.authUrl;
     const url = new URL(path, authUrl);
-    // Absolute URLs to other hosts would otherwise receive the API key and a valid signature.
+    // Absolute URLs to other hosts would otherwise receive an access token and a valid signature.
     const authOrigin = new URL(authUrl).origin;
     if (url.origin !== authOrigin) {
       throw new DaywalkerError(`Refusing to send Daywalker credentials to ${url.origin}; fetch() only targets ${authOrigin}`);
     }
     const method = (init?.method ?? (init?.body !== undefined ? "POST" : "GET")).toUpperCase();
-    const doFetch = this._rawConfig.fetch ?? globalThis.fetch;
+    const doFetch = this.#fetch;
     const { retry: _retry, timeoutMs: _timeoutMs, idempotencyKey, body: rawBody, signal: callerSignal, ...requestInit } = init ?? {};
 
-    const retryOpts: RetryOptions = { ...this._config.retry };
+    const retryOpts: RetryOptions = { ...this.#config.retry };
     for (const [k, v] of Object.entries(init?.retry ?? {})) {
       if (v !== undefined) (retryOpts as Record<string, unknown>)[k] = v;
     }
@@ -332,7 +522,7 @@ export class Daywalker {
     const jitter = retryOpts.jitter ?? true;
     const maxRetryAfterMs = retryOpts.maxRetryAfterMs ?? MAX_RETRY_AFTER_MS;
     const retryNetworkErrors = retryOpts.retryNetworkErrors ?? (IDEMPOTENT_METHODS.has(method) || Boolean(idempotencyKey));
-    const timeoutMs = init?.timeoutMs ?? this._config.timeoutMs;
+    const timeoutMs = init?.timeoutMs ?? this.#config.timeoutMs;
     const backoff = (n: number) => {
       let delayMs = initialDelayMs * Math.pow(backoffFactor, n - 1);
       if (jitter) delayMs = delayMs * (0.8 + Math.random() * 0.4);
@@ -340,8 +530,12 @@ export class Daywalker {
     };
 
     callerSignal?.throwIfAborted();
-    const signingKey = await this.getLoadedSigningKey();
+    const signingKey = await this.#getLoadedSigningKey();
     const body = await prepareBody(rawBody, Boolean(signingKey));
+    // The token endpoint authenticates itself (see _tokenRequest); everything else gets an OAuth access token.
+    const isTokenEndpoint = url.pathname === TOKEN_PATH;
+    const autoAuth = !isTokenEndpoint && !new Headers(init?.headers).has("authorization");
+    let refreshedExpired = false;
 
     let attempt = 0;
     while (true) {
@@ -354,8 +548,8 @@ export class Daywalker {
       if (!headers.has("accept")) {
         headers.set("accept", "application/json");
       }
-      if (this._config.apiKey && !headers.has("authorization")) {
-        headers.set("authorization", `Bearer ${this._config.apiKey}`);
+      if (autoAuth) {
+        headers.set("authorization", `DPoP ${await this.accessToken()}`);
       }
       if (idempotencyKey && !headers.has("idempotency-key")) {
         headers.set("idempotency-key", idempotencyKey);
@@ -363,10 +557,9 @@ export class Daywalker {
       // DPoP (RFC 9449) is mandatory on the token endpoint and when presenting a DPoP access token.
       const auth = headers.get("authorization") ?? "";
       const isDpopAuth = /^dpop\s+/i.test(auth);
-      const isTokenEndpoint = url.pathname === "/api/v1/oauth/token";
-      if (!headers.has("dpop") && (isTokenEndpoint || isDpopAuth)) {
+      if ((autoAuth || !headers.has("dpop")) && (isTokenEndpoint || isDpopAuth)) {
         const accessToken = isDpopAuth ? auth.replace(/^dpop\s+/i, "") : undefined;
-        headers.set("dpop", await createDpopProof(await this.getDpopKey(), { method, url: url.toString(), accessToken }));
+        headers.set("dpop", await createDpopProof(await this.#getDpopKey(), { method, url: url.toString(), accessToken }));
       }
 
       if (signingKey) {
@@ -377,7 +570,7 @@ export class Daywalker {
           authority: url.host,
           body: body.bytes,
           key: signingKey,
-          keyid: this._config.keyId ?? undefined,
+          keyid: this.#config.keyId ?? undefined,
           nonce: generateNonce(),
         });
 
@@ -395,6 +588,8 @@ export class Daywalker {
         headers,
         body: body.send ?? undefined,
         redirect: requestInit.redirect === "error" ? "error" : "manual",
+        // Never served from or stored in an HTTP cache (Next.js patches fetch to cache by default).
+        cache: "no-store",
         signal,
       };
 
@@ -417,6 +612,14 @@ export class Daywalker {
         throw redirectError(url.pathname, res);
       }
 
+      if (res.status === 401 && autoAuth && !refreshedExpired && body.replayable && (await errorCode(res)) === "ACCESS_TOKEN_EXPIRED") {
+        // The server's clock says the token expired before ours did: refresh it and try once more.
+        refreshedExpired = true;
+        if (this.#tokens) this.#tokens = { ...this.#tokens, expiresAt: 0 };
+        res.body?.cancel().catch(() => {});
+        continue;
+      }
+
       if (res.status === 429 && body.replayable && attempt < maxRetries) {
         const retryAfterSec = parseRetryAfter(res.headers.get("retry-after"));
         let delayMs = backoff(attempt + 1);
@@ -435,107 +638,145 @@ export class Daywalker {
     }
   }
 
-  private _cacheGet(key: string): ValidateResult | undefined {
-    const entry = this._cache.get(key);
+  #cacheGet(key: string): { result: ValidateResult; jkt?: string } | undefined {
+    const entry = this.#cache.get(key);
     if (!entry) return undefined;
-    this._cache.delete(key);
+    this.#cache.delete(key);
     if (entry.expiresAt <= Date.now()) return undefined;
-    this._cache.set(key, entry); // most recently used goes last
-    return entry.result;
+    this.#cache.set(key, entry); // most recently used goes last
+    return entry;
   }
 
-  private _cacheSet(key: string, result: ValidateResult, ttlMs: number, notAfterMs = Infinity): void {
+  #cacheSet(key: string, result: ValidateResult, ttlMs: number, notAfterMs = Infinity, jkt?: string): void {
     const expiresAt = Math.min(Date.now() + ttlMs, notAfterMs);
     if (expiresAt <= Date.now()) return;
-    this._cache.delete(key);
-    this._cache.set(key, { result, expiresAt });
-    while (this._cache.size > MAX_VALIDATION_CACHE_ENTRIES) {
-      this._cache.delete(this._cache.keys().next().value as string);
+    this.#cache.delete(key);
+    // Frozen, so nothing holding the entry can change what later callers get.
+    this.#cache.set(key, Object.freeze({ result: deepFreeze(cloneResult(result)), expiresAt, jkt }));
+    while (this.#cache.size > MAX_VALIDATION_CACHE_ENTRIES) {
+      this.#cache.delete(this.#cache.keys().next().value as string);
     }
   }
 
   /**
-   * Validates an incoming bearer token with memory caching and discriminated union return.
-   * Supports zero-egress offline verification for JWT token leases when Daywalker's public key is configured.
-   * A missing token is always rejected (401); it never falls back to this service's own API key —
-   * use `validateServiceKey()` for that.
-   * Online validation fails closed: only a 2xx JSON answer with `valid: true` and a sane shape is accepted.
-   * Outages (network errors, timeouts, 5xx, malformed answers) return status 503 with error NETWORK_ERROR or
-   * SERVICE_UNAVAILABLE and are never cached. Each call gets its own copy of the (cached) result.
+   * Checks the DPoP proof a DPoP-bound (`cnf.jkt`) access token must come with. Run on every request, cached
+   * token or not: a proof is single-use, so a copied token is worthless without the client's private key.
    */
-  public async validateToken(
-    tokenOrOptions?: string | { token?: string; serviceSlug?: string; forceRefresh?: boolean; offlineOnly?: boolean },
-    options?: { serviceSlug?: string; forceRefresh?: boolean; offlineOnly?: boolean }
-  ): Promise<ValidateResult> {
-    let token: string | undefined;
-    let serviceSlug: string;
-    let forceRefresh = false;
-    let offlineOnly = false;
-
-    if (typeof tokenOrOptions === "string") {
-      token = tokenOrOptions;
-      serviceSlug = (options?.serviceSlug ?? this._config.serviceSlug ?? "").toLowerCase();
-      forceRefresh = options?.forceRefresh ?? false;
-      offlineOnly = options?.offlineOnly ?? false;
-    } else {
-      token = tokenOrOptions?.token ?? undefined;
-      serviceSlug = (tokenOrOptions?.serviceSlug ?? this._config.serviceSlug ?? "").toLowerCase();
-      forceRefresh = tokenOrOptions?.forceRefresh ?? false;
-      offlineOnly = tokenOrOptions?.offlineOnly ?? false;
-    }
-
-    if (!token) {
+  async #checkDpop(token: string, jkt: string, dpop: IncomingDpop | undefined): Promise<ValidateResult | null> {
+    if (!dpop || typeof dpop.proof !== "string" || dpop.proof === "") {
       return {
         ok: false,
-        error: "INVALID_TOKEN",
+        error: "DPOP_REQUIRED",
         status: 401,
-        message: "Missing token to validate",
+        message: "This access token is DPoP-bound: present it as `Authorization: DPoP <token>` with a DPoP proof",
       };
+    }
+    let url = dpop.url;
+    if (this.#publicOrigin) {
+      try {
+        const u = new URL(dpop.url);
+        url = `${this.#publicOrigin}${u.pathname}${u.search}`;
+      } catch {
+        url = "";
+      }
+    }
+    const res = await verifyDpopProof({
+      proof: dpop.proof,
+      method: String(dpop.method ?? ""),
+      url,
+      accessToken: token,
+      expectedJkt: jkt,
+      replayStore: this.#dpopReplayStore,
+    });
+    return res.valid ? null : { ok: false, error: "INVALID_DPOP_PROOF", status: 401, message: res.error ?? "Invalid DPoP proof" };
+  }
+
+  /**
+   * Validates an incoming token with memory caching and a discriminated union result.
+   * - Access tokens (JWTs) are verified offline when Daywalker's public key is configured. A DPoP-bound
+   *   token (`cnf.jkt`) is only accepted with a valid DPoP proof (`options.dpop`; the adapters pass it).
+   * - Other tokens are validated online with `POST /api/v1/tokens/validate`, authenticated with this
+   *   service's own DPoP-bound access token. The answer must name the expected service.
+   * - A missing, oversized or malformed token is rejected (401) without calling Daywalker. A token is never
+   *   replaced by this service's own credentials: use `validateServiceCredentials()` for that.
+   * - Online validation fails closed: only a 2xx JSON answer with `valid: true` and a sane shape is accepted.
+   *   Outages (network errors, timeouts, 5xx, malformed answers) return status 503 with error NETWORK_ERROR or
+   *   SERVICE_UNAVAILABLE and are never cached. Each call gets its own copy of the (cached) result.
+   */
+  public async validateToken(
+    tokenOrOptions?: string | (ValidateTokenOptions & { token?: string }),
+    options?: ValidateTokenOptions
+  ): Promise<ValidateResult> {
+    const opts: ValidateTokenOptions & { token?: unknown } =
+      typeof tokenOrOptions === "string" ? { ...options, token: tokenOrOptions } : { ...(tokenOrOptions ?? {}) };
+    const token = opts.token;
+    const forceRefresh = opts.forceRefresh === true;
+    const offlineOnly = opts.offlineOnly === true;
+
+    if (token === undefined || token === null || token === "") {
+      return { ok: false, error: "INVALID_TOKEN", status: 401, message: "Missing token to validate" };
+    }
+    if (typeof token !== "string" || token.length > MAX_TOKEN_LENGTH || !TOKEN_PATTERN.test(token)) {
+      // Never forwarded, hashed or cached: it can't be a Daywalker token.
+      return { ok: false, error: "INVALID_TOKEN", status: 401, message: "Malformed token" };
+    }
+    const serviceSlug = String(opts.serviceSlug ?? this.#config.serviceSlug ?? "").toLowerCase();
+    if (serviceSlug && !SERVICE_SLUG_PATTERN.test(serviceSlug)) {
+      return { ok: false, error: "CONFIGURATION_ERROR", status: 500, message: "serviceSlug is not a valid Daywalker service slug" };
     }
 
     // Keyed by a hash so raw tokens are never held as cache keys.
     const cacheKey = `${serviceSlug || "default"}:${await sha256Base64Url(token)}`;
-    const cached = forceRefresh ? undefined : this._cacheGet(cacheKey);
+    const cached = forceRefresh ? undefined : this.#cacheGet(cacheKey);
     if (cached) {
-      return cloneResult(cached);
+      if (cached.jkt) {
+        const failure = await this.#checkDpop(token, cached.jkt, opts.dpop);
+        if (failure) return failure;
+      }
+      return cloneResult(cached.result);
     }
 
-    // Check for offline JWT lease verification
-    if (this._config.daywalkerPublicKey && token.split(".").length === 3) {
+    // Offline verification of Daywalker access tokens: against the fetched JWKS with `jwks: "auto"`, else
+    // (or while no key set can be obtained) against the configured public key.
+    const isJwt = token.split(".").length === 3;
+    const offlineKey = isJwt ? ((this.#config.jwks === "auto" ? await this.#jwksFor(jwtKid(token)) : null) ?? this.#config.daywalkerPublicKey) : null;
+    if (offlineKey) {
       const jwtResult = await verifyJwtLease({
         token,
-        publicKey: this._config.daywalkerPublicKey,
+        publicKey: offlineKey,
         expectedServiceSlug: serviceSlug || undefined,
-        expectedIssuer: this._config.leaseIssuer ?? DEFAULT_ISSUER,
+        expectedIssuer: this.#config.leaseIssuer ?? DEFAULT_ISSUER,
       });
 
       if (jwtResult.valid && jwtResult.payload) {
         const payload = jwtResult.payload;
+        const cnf = payload.cnf as { jkt?: unknown } | undefined;
+        const jkt = typeof cnf?.jkt === "string" ? cnf.jkt : undefined;
+        if (jkt) {
+          const failure = await this.#checkDpop(token, jkt, opts.dpop);
+          if (failure) return failure;
+        }
+        const user = payload.user && typeof payload.user === "object" ? (payload.user as Record<string, unknown>) : {};
+        const userId = typeof user.id === "string" ? user.id : typeof payload.sub === "string" ? payload.sub : undefined;
+        const services = leaseServices(payload);
         const result: ValidateResult = {
           ok: true,
           data: {
-            serviceSlug: serviceSlug || ((payload.serviceSlug || payload.service || "") as string),
-            tenantId: (payload.tenantId || payload.sub || "") as string,
-            rateLimit: (payload.rateLimit as RateLimitWindow) ?? {
-              limit: 1000,
-              remaining: 999,
-              reset: Math.floor(Date.now() / 1000) + 60,
-            },
-            rateLimitHourly: payload.rateLimitHourly as RateLimitWindow | undefined,
-            tokenId: (payload.tokenId || payload.sub) as string | undefined,
-            tokenName: payload.tokenName as string | undefined,
-            userId: payload.userId as string | undefined,
-            stage: payload.stage as string | undefined,
-            offlineVerified: true,
+            // Claims first: the verified fields below can't be overridden by a claim of the same name.
             ...payload,
-            // Every service the lease covers: its `services` claim, else its audience.
-            services: leaseServices(payload),
+            serviceSlug: serviceSlug || services[0] || "",
+            tenantId: userId ?? "",
+            userId,
+            tokenId: typeof payload.jti === "string" ? payload.jti : undefined,
+            rateLimit: { limit: 0, remaining: 0, reset: 0 },
+            offlineVerified: true,
+            services,
           },
         };
 
-        if (this._config.cacheTtlMs > 0) {
-          // Never cache a lease past its own expiry.
-          this._cacheSet(cacheKey, result, this._config.cacheTtlMs, (payload.exp as number) * 1000);
+        if (this.#config.cacheTtlMs > 0) {
+          // Never cache a token past its own expiry.
+          this.#cacheSet(cacheKey, result, this.#config.cacheTtlMs, (payload.exp as number) * 1000, jkt);
         }
         return cloneResult(result);
       } else if (offlineOnly) {
@@ -546,31 +787,39 @@ export class Daywalker {
           message: jwtResult.error ?? "Offline token verification failed",
         };
       }
+    } else if (offlineOnly && isJwt && this.#config.jwks === "auto") {
+      // Fail closed: no key set, no offline verdict.
+      return {
+        ok: false,
+        error: "SERVICE_UNAVAILABLE",
+        status: 503,
+        message: "Offline verification failed: Daywalker's JWKS could not be fetched",
+      };
     } else if (offlineOnly) {
       return {
         ok: false,
         error: "CONFIGURATION_ERROR",
         status: 500,
-        message: "Offline verification requires DAYWALKER_PUBLIC_KEY and a valid JWT token lease",
+        message: "Offline verification requires DAYWALKER_PUBLIC_KEY or DAYWALKER_JWKS=auto and a Daywalker access token (JWT)",
       };
     }
 
     // Online verification, deduplicated across concurrent callers
     const inflightKey = `${cacheKey}`;
-    const pending = this._inflight.get(inflightKey);
+    const pending = this.#inflight.get(inflightKey);
     if (pending) return pending.then(cloneResult);
-    const run = this._validateOnline(token, serviceSlug, cacheKey).finally(() => {
-      this._inflight.delete(inflightKey);
+    const run = this.#validateOnline(token, serviceSlug, cacheKey).finally(() => {
+      this.#inflight.delete(inflightKey);
     });
-    this._inflight.set(inflightKey, run);
+    this.#inflight.set(inflightKey, run);
     return run.then(cloneResult);
   }
 
-  private async _validateOnline(token: string, serviceSlug: string, cacheKey: string): Promise<ValidateResult> {
-    const negTtl = this._config.negativeCacheTtlMs;
+  async #validateOnline(token: string, serviceSlug: string, cacheKey: string): Promise<ValidateResult> {
+    const negTtl = this.#config.negativeCacheTtlMs;
     const fail = (result: Extract<ValidateResult, { ok: false }>): ValidateResult => {
       if (negTtl > 0 && result.error !== "RATE_LIMITED" && result.error !== "NETWORK_ERROR" && result.error !== "SERVICE_UNAVAILABLE") {
-        this._cacheSet(cacheKey, result, negTtl);
+        this.#cacheSet(cacheKey, result, negTtl);
       }
       return result;
     };
@@ -583,17 +832,15 @@ export class Daywalker {
     });
     try {
       // No service slug is sent: the caller is identified by its credentials, not by naming a service
-      const validateBody: Record<string, string> = { token };
-
       const res = await this.fetch("/api/v1/tokens/validate", {
         method: "POST",
-        body: validateBody,
+        body: { token },
         // Validation is read-only, so repeating it after a lost response is safe.
-        retry: { retryNetworkErrors: this._config.retry.retryNetworkErrors ?? true },
+        retry: { retryNetworkErrors: this.#config.retry.retryNetworkErrors ?? true },
       });
 
-      // A body that times out is an outage (thrown to NETWORK_ERROR below), never an empty answer.
-      const text = await readText(res, this._config.timeoutMs);
+      // A body that times out or is too large is an outage (thrown to NETWORK_ERROR below), never an answer.
+      const text = await readText(res, this.#config.timeoutMs);
       let parsed: unknown;
       try {
         parsed = JSON.parse(text);
@@ -627,8 +874,26 @@ export class Daywalker {
         if (problem) {
           return unavailable(`Daywalker Auth returned a malformed validation result (${problem})`);
         }
+        const servedSlug = ((payloadData.serviceSlug ?? json.serviceSlug) as string | undefined)?.toLowerCase();
+        const reported = (payloadData.services ?? json.services) as string[] | undefined;
+        const services = Array.from(new Set((reported ?? (servedSlug ? [servedSlug] : [])).map((s) => s.toLowerCase())));
+        if (services.length === 0 && !servedSlug) {
+          return unavailable("Daywalker Auth returned a malformed validation result (no service named)");
+        }
+        // The token was validated for whichever service it shares with our credentials: make sure that
+        // includes this one, so a token for a sibling service is never accepted here.
+        if (serviceSlug && servedSlug !== serviceSlug && !services.includes(serviceSlug)) {
+          return fail({
+            ok: false,
+            error: "SERVICE_NOT_GRANTED",
+            status: 403,
+            message: `This token is not valid for ${serviceSlug}`,
+          });
+        }
         const data: TokenPayload = {
-          serviceSlug: (json.serviceSlug as string) || serviceSlug,
+          // Server fields first: the normalized fields below always win.
+          ...payloadData,
+          serviceSlug: serviceSlug || servedSlug || services[0],
           tenantId: (payloadData.tenantId || payloadData.userId || json.tenantId || json.userId || "") as string,
           rateLimit: (payloadData.rateLimit || json.rateLimit || { limit: 0, remaining: 0, reset: 0 }) as RateLimitWindow,
           rateLimitHourly: (payloadData.rateLimitHourly || json.rateLimitHourly) as RateLimitWindow | undefined,
@@ -636,17 +901,13 @@ export class Daywalker {
           tokenName: (payloadData.tokenName || json.tokenName) as string | undefined,
           userId: (payloadData.userId || json.userId) as string | undefined,
           stage: (payloadData.stage || json.stage) as string | undefined,
-          ...payloadData,
-          services: ((payloadData.services ?? json.services) as string[] | undefined) ?? [(json.serviceSlug as string) || serviceSlug],
+          offlineVerified: false,
+          services: services.length > 0 ? services : [servedSlug!],
         };
 
-        const result: ValidateResult = {
-          ok: true,
-          data,
-        };
-
-        if (this._config.cacheTtlMs > 0) {
-          this._cacheSet(cacheKey, result, this._config.cacheTtlMs);
+        const result: ValidateResult = { ok: true, data };
+        if (this.#config.cacheTtlMs > 0) {
+          this.#cacheSet(cacheKey, result, this.#config.cacheTtlMs);
         }
         return result;
       }
@@ -657,7 +918,7 @@ export class Daywalker {
       }
 
       let error = "INVALID_TOKEN";
-      const errMsg = String((typeof json.message === "string" && json.message) || (typeof json.error === "string" && json.error) || "");
+      const errMsg = String((typeof json.message === "string" && json.message) || (typeof json.error === "string" && json.error) || "").slice(0, 500);
       if (json.error === "EXPIRED" || /expired/i.test(errMsg)) {
         error = "EXPIRED";
       } else if (json.error === "REVOKED" || /revoked/i.test(errMsg)) {
@@ -672,6 +933,8 @@ export class Daywalker {
         message: redactSecrets(errMsg || `Validation failed with HTTP ${res.status}`),
       });
     } catch (err) {
+      // This service couldn't get its own access token: says nothing about the caller's token.
+      if (err instanceof DaywalkerAuthError) return credentialFailure(err);
       return {
         ok: false,
         error: "NETWORK_ERROR",
@@ -682,29 +945,64 @@ export class Daywalker {
   }
 
   /**
-   * Service health check: validates this service's own configured API key (DAYWALKER_API_KEY).
-   * Never use this to authenticate an incoming request.
+   * Service health check: runs this service's OAuth client credentials flow (`accessToken()`) and checks
+   * that the granted services include `serviceSlug` (default: the configured one; with none configured, at
+   * least one service must be granted). Never use this to authenticate an incoming request. `forceRefresh`
+   * starts a new client credentials grant.
    */
-  public async validateServiceKey(options?: { serviceSlug?: string; forceRefresh?: boolean }): Promise<ValidateResult> {
-    if (!this._config.apiKey) {
+  public async validateServiceCredentials(options?: { serviceSlug?: string; forceRefresh?: boolean }): Promise<ValidateResult> {
+    const serviceSlug = String(options?.serviceSlug ?? this.#config.serviceSlug ?? "").toLowerCase();
+    if (serviceSlug && !SERVICE_SLUG_PATTERN.test(serviceSlug)) {
+      return { ok: false, error: "CONFIGURATION_ERROR", status: 500, message: "serviceSlug is not a valid Daywalker service slug" };
+    }
+    let tokens: TokenSet;
+    try {
+      if (options?.forceRefresh === true) await this.getTokens();
+      else await this.accessToken();
+      tokens = this.#tokens!;
+    } catch (err) {
+      if (err instanceof DaywalkerAuthError) return credentialFailure(err);
       return {
         ok: false,
-        error: "CONFIGURATION_ERROR",
-        status: 500,
-        message: "DAYWALKER_API_KEY is not set",
+        error: "NETWORK_ERROR",
+        status: 503,
+        message: redactSecrets(`Could not reach Daywalker Auth: ${(err as Error).message}`),
       };
     }
-    return this.validateToken(this._config.apiKey, options);
+    if (serviceSlug ? !tokens.services.includes(serviceSlug) : tokens.services.length === 0) {
+      return {
+        ok: false,
+        error: "SERVICE_NOT_GRANTED",
+        status: 403,
+        message: serviceSlug
+          ? `The OAuth client credentials don't cover ${serviceSlug} (granted: ${tokens.services.join(", ") || "none"})`
+          : "The OAuth client credentials were granted no service",
+      };
+    }
+    const claims = decodeJwtClaims(tokens.accessToken);
+    const user = claims.user && typeof claims.user === "object" ? (claims.user as Record<string, unknown>) : {};
+    const userId = typeof user.id === "string" ? user.id : typeof claims.sub === "string" ? claims.sub : undefined;
+    return {
+      ok: true,
+      data: {
+        serviceSlug: serviceSlug || tokens.services[0],
+        tenantId: userId ?? "",
+        userId,
+        rateLimit: { limit: 0, remaining: 0, reset: 0 },
+        services: [...tokens.services],
+        expiresAt: tokens.expiresAt,
+      },
+    };
   }
 
   /**
    * Throws DaywalkerAuthError or DaywalkerRateLimitError if token is invalid or rate limited.
    */
   public async requireValidToken(
-    tokenOrOptions?: string | { token?: string; serviceSlug?: string; offlineOnly?: boolean },
-    options?: { serviceSlug?: string; offlineOnly?: boolean }
+    tokenOrOptions?: string | (ValidateTokenOptions & { token?: string }),
+    options?: ValidateTokenOptions
   ): Promise<TokenPayload> {
-    const result = await this.validateToken(tokenOrOptions as any, options);
+    const result = await this.validateToken(tokenOrOptions, options);
     if (!result.ok) {
       if (result.status === 429) {
         throw new DaywalkerRateLimitError(result.message, result.retryAfter);
@@ -714,52 +1012,88 @@ export class Daywalker {
     return result.data;
   }
 
-  private _tokens: TokenSet | null = null;
-  private _tokenFlight: Promise<TokenSet> | null = null;
+  #tokens: TokenSet | null = null;
+  #tokenFlight: Promise<TokenSet> | null = null;
 
-  private async _tokenRequest(body: Record<string, unknown>): Promise<TokenSet> {
-    const res = await this.fetch("/api/v1/oauth/token", { method: "POST", body });
-    const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  /**
+   * POST /api/v1/oauth/token. The client credentials grant is the one request that carries the API key
+   * (`Authorization: Bearer`, next to the RFC 9421 signature); a refresh is authenticated by its refresh
+   * token and DPoP proof alone. The answer is checked before it is trusted: it must be a DPoP-bound token
+   * pair of sane shape, and its lifetime is capped so a bad `expires_at` can't keep a token alive.
+   */
+  async #tokenRequest(body: Record<string, unknown>): Promise<TokenSet> {
+    const headers: Record<string, string> = {};
+    if (body.grant_type === "client_credentials") {
+      if (!this.#config.apiKey) {
+        throw new DaywalkerAuthError("DAYWALKER_API_KEY is not set: it is the client credential for the OAuth token endpoint", 500, "CONFIGURATION_ERROR");
+      }
+      if (!API_KEY_PATTERN.test(this.#config.apiKey)) {
+        throw new DaywalkerAuthError("DAYWALKER_API_KEY contains characters an API key can't have", 500, "CONFIGURATION_ERROR");
+      }
+      headers.authorization = `Bearer ${this.#config.apiKey}`;
+    }
+    const res = await this.fetch(TOKEN_PATH, { method: "POST", body, headers });
+    const json = await readJsonObject(res, this.#config.timeoutMs);
+    const str = (v: unknown) => (typeof v === "string" ? v.slice(0, 500) : undefined);
     if (res.status !== 200) {
       throw new DaywalkerAuthError(
-        redactSecrets(String(json.message || json.error || `Token request failed with HTTP ${res.status}`)),
+        redactSecrets(str(json.message) ?? str(json.error) ?? `Token request failed with HTTP ${res.status}`),
         res.status,
-        (json.code as string | undefined) ?? (json.error as string | undefined)
+        str(json.code) ?? str(json.error)
       );
     }
-    if (typeof json.access_token !== "string" || typeof json.refresh_token !== "string") {
-      throw new DaywalkerAuthError("Daywalker Auth returned a malformed token response", res.status, "SERVICE_UNAVAILABLE");
-    }
-    const services = Array.isArray(json.services) ? json.services.filter((x): x is string => typeof x === "string") : [];
-    return {
+    const malformed = (why: string) => new DaywalkerAuthError(`Daywalker Auth returned a malformed token response (${why})`, 502, "SERVICE_UNAVAILABLE");
+    const isToken = (v: unknown): v is string => typeof v === "string" && v.length <= MAX_TOKEN_LENGTH && TOKEN_PATTERN.test(v);
+    if (!isToken(json.access_token) || !isToken(json.refresh_token)) throw malformed("tokens missing or not tokens");
+    // Every token Daywalker issues is sender-constrained; an unbound (bearer) token is refused, not used.
+    if (typeof json.token_type !== "string" || json.token_type.toLowerCase() !== "dpop") throw malformed("token_type is not DPoP");
+    const now = Math.floor(Date.now() / 1000);
+    const expiresIn = Math.floor(Number(json.expires_in));
+    if (!Number.isFinite(expiresIn) || expiresIn <= 0) throw malformed("expires_in is not a positive number");
+    const lifetime = Math.min(expiresIn, MAX_ACCESS_TOKEN_LIFETIME_SECONDS);
+    const expiresAtClaim = Number(json.expires_at);
+    // Earliest of what the server says and what expires_in allows (a past expires_at means already expired).
+    const expiresAt = Number.isFinite(expiresAtClaim) && json.expires_at !== undefined ? Math.min(Math.floor(expiresAtClaim), now + lifetime) : now + lifetime;
+    const services = Array.isArray(json.services)
+      ? Array.from(new Set(json.services.filter((x): x is string => typeof x === "string" && SERVICE_SLUG_PATTERN.test(x.toLowerCase())).map((x) => x.toLowerCase())))
+      : [];
+    const refreshExpiresIn = Math.max(0, Math.floor(Number(json.refresh_expires_in) || 0));
+    return deepFreeze({
       accessToken: json.access_token,
       refreshToken: json.refresh_token,
-      tokenType: String(json.token_type ?? "DPoP"),
-      expiresAt: Number(json.expires_at) || Math.floor(Date.now() / 1000) + Number(json.expires_in ?? 0),
-      expiresIn: Number(json.expires_in ?? 0),
-      refreshExpiresIn: Number(json.refresh_expires_in ?? 0),
-      scope: String(json.scope ?? services.join(" ")),
+      tokenType: "DPoP",
+      expiresAt,
+      expiresIn: lifetime,
+      refreshExpiresIn,
+      scope: services.join(" "),
       services,
-      jwksUri: typeof json.jwks_uri === "string" ? json.jwks_uri : undefined,
-    };
+      jwksUri: typeof json.jwks_uri === "string" && json.jwks_uri.startsWith(`${this.#config.authUrl}/`) ? json.jwks_uri : undefined,
+    });
   }
 
   /**
    * Client credentials grant (RFC 6749 §4.4): the signed request (API key + registered Ed25519 key) is
-   * exchanged for a short-lived access token JWT listing every service the credentials cover, and a
-   * rotating refresh token. No service slug is sent. The tokens are remembered for `accessToken()`.
+   * exchanged for a short-lived access token JWT and a rotating refresh token. By default the grant is
+   * narrowed to the configured service slug(s) (least privilege); with none configured it covers every
+   * service the credentials do. The tokens are remembered for `accessToken()`. The result is frozen.
    */
   public async getTokens(options: GetTokensOptions = {}): Promise<TokenSet> {
-    const scope = options.scope ? parseServiceSlugs(options.scope) : undefined;
+    const scope = options.scope ? parseServiceSlugs(options.scope) : this.#config.serviceSlugs.length > 0 ? [...this.#config.serviceSlugs] : undefined;
     if (options.scope && (!scope || scope.length === 0)) {
       throw new DaywalkerAuthError("getTokens: scope must list at least one service slug", 400, "INVALID_REQUEST");
     }
-    const tokens = await this._tokenRequest({
+    if (scope && !scope.every((slug) => SERVICE_SLUG_PATTERN.test(slug))) {
+      throw new DaywalkerAuthError("getTokens: scope must list Daywalker service slugs", 400, "INVALID_REQUEST");
+    }
+    if (options.expiresIn !== undefined && (!Number.isInteger(options.expiresIn) || options.expiresIn < 300 || options.expiresIn > 900)) {
+      throw new DaywalkerAuthError("getTokens: expiresIn must be a whole number of seconds from 300 to 900", 400, "INVALID_REQUEST");
+    }
+    const tokens = await this.#tokenRequest({
       grant_type: "client_credentials",
       ...(scope ? { scope: scope.join(" ") } : {}),
       ...(options.expiresIn ? { expires_in: options.expiresIn } : {}),
     });
-    this._tokens = tokens;
+    this.#tokens = tokens;
     return tokens;
   }
 
@@ -769,10 +1103,13 @@ export class Daywalker {
    * are serialized per client and the new refresh token must replace the stored one.
    */
   public async refreshTokens(refreshToken?: string): Promise<TokenSet> {
-    const token = refreshToken ?? this._tokens?.refreshToken;
+    const token = refreshToken ?? this.#tokens?.refreshToken;
     if (!token) throw new DaywalkerAuthError("refreshTokens: no refresh token (call getTokens() first)", 400, "INVALID_REQUEST");
-    const tokens = await this._tokenRequest({ grant_type: "refresh_token", refresh_token: token });
-    this._tokens = tokens;
+    if (typeof token !== "string" || token.length > MAX_TOKEN_LENGTH || !TOKEN_PATTERN.test(token)) {
+      throw new DaywalkerAuthError("refreshTokens: malformed refresh token", 400, "INVALID_REQUEST");
+    }
+    const tokens = await this.#tokenRequest({ grant_type: "refresh_token", refresh_token: token });
+    this.#tokens = tokens;
     return tokens;
   }
 
@@ -782,10 +1119,10 @@ export class Daywalker {
    * refresh token is never presented twice.
    */
   public async accessToken(): Promise<string> {
-    const current = this._tokens;
+    const current = this.#tokens;
     if (current && current.expiresAt - 30 > Math.floor(Date.now() / 1000)) return current.accessToken;
-    if (!this._tokenFlight) {
-      this._tokenFlight = (async () => {
+    if (!this.#tokenFlight) {
+      this.#tokenFlight = (async () => {
         if (current) {
           try {
             return await this.refreshTokens();
@@ -796,24 +1133,29 @@ export class Daywalker {
         }
         return this.getTokens();
       })().finally(() => {
-        this._tokenFlight = null;
+        this.#tokenFlight = null;
       });
     }
-    return (await this._tokenFlight).accessToken;
+    return (await this.#tokenFlight).accessToken;
   }
 
   /**
    * Fetches Daywalker's public JWKS (GET /.well-known/jwks.json) for offline lease verification.
    * Uses the configured `fetch`, sends no credentials, never follows redirects and times out after `timeoutMs`.
    */
-  public async fetchJwks(): Promise<{ keys: PublicJwk[] }> {
-    const doFetch = this._rawConfig.fetch ?? globalThis.fetch;
-    const { signal, cleanup } = attemptSignal(undefined, this._config.timeoutMs);
+  public fetchJwks(): Promise<{ keys: PublicJwk[] }> {
+    return this.#fetchJwks();
+  }
+
+  async #fetchJwks(): Promise<{ keys: PublicJwk[] }> {
+    const doFetch = this.#fetch;
+    const { signal, cleanup } = attemptSignal(undefined, this.#config.timeoutMs);
     let res: Response;
     try {
-      res = await doFetch(`${this._config.authUrl.replace(/\/+$/, "")}/.well-known/jwks.json`, {
+      res = await doFetch(`${this.#config.authUrl.replace(/\/+$/, "")}/.well-known/jwks.json`, {
         headers: { Accept: "application/json" },
         redirect: "manual",
+        cache: "no-store",
         signal,
       });
     } finally {
@@ -823,7 +1165,7 @@ export class Daywalker {
     if (!res.ok) throw new DaywalkerError(`Could not fetch JWKS (HTTP ${res.status})`, res.status);
     let json: { keys?: unknown } | null = null;
     try {
-      json = JSON.parse(await readText(res, this._config.timeoutMs));
+      json = JSON.parse(await readText(res, this.#config.timeoutMs));
     } catch (err) {
       if ((err as Error).name === "TimeoutError") throw err;
     }
@@ -834,14 +1176,51 @@ export class Daywalker {
   }
 
   /**
+   * The key set to verify a token naming `kid` with (`jwks: "auto"`), or null when none could be obtained.
+   * The set is refetched once it is older than `JWKS_CACHE_TTL_MS`, or when it has no key with this `kid`
+   * (Daywalker rotated its key), but never sooner than `JWKS_REFETCH_COOLDOWN_MS` after the last attempt.
+   * Concurrent callers share one fetch. A failed fetch, or one with no usable key, keeps the previous set.
+   * Only `${authUrl}/.well-known/jwks.json` is ever fetched: a `jwks_uri` from anywhere is not followed.
+   */
+  async #jwksFor(kid: string | undefined): Promise<PublicJwks | null> {
+    const current = this.#jwks;
+    const stale = !current || Date.now() - current.fetchedAt >= JWKS_CACHE_TTL_MS;
+    const unknownKid = Boolean(current && kid !== undefined && !current.set.keys.some((k) => k.kid === kid));
+    if ((stale || unknownKid) && (this.#jwksFlight || Date.now() - this.#jwksAttemptAt >= JWKS_REFETCH_COOLDOWN_MS)) {
+      await this.#refreshJwks();
+    }
+    return this.#jwks?.set ?? null;
+  }
+
+  #refreshJwks(): Promise<void> {
+    if (!this.#jwksFlight) {
+      this.#jwksAttemptAt = Date.now();
+      this.#jwksFlight = this.#fetchJwks()
+        .then(
+          ({ keys }) => {
+            const usable = usableJwks(keys);
+            if (usable.length > 0) this.#jwks = { set: deepFreeze({ keys: usable }), fetchedAt: Date.now() };
+          },
+          () => {
+            // Keep the last good set; the cooldown spaces out the next attempt.
+          }
+        )
+        .finally(() => {
+          this.#jwksFlight = null;
+        });
+    }
+    return this.#jwksFlight;
+  }
+
+  /**
    * The public JWK(s) configured for this service: the current signing key, then the previous one
    * (`previousSigningKey`) during a rotation, so requests from instances still on the old key keep verifying.
    */
   public async keys(): Promise<{ keys: PublicJwk[] }> {
-    const key = await this.getLoadedSigningKey();
+    const key = await this.#getLoadedSigningKey();
     const keys = key ? [key.publicJwk] : [];
     // A broken previous key must not take the current one offline; selfCheck() reports it.
-    const previous = await this.getLoadedPreviousSigningKey().catch(() => null);
+    const previous = await this.#getLoadedPreviousSigningKey().catch(() => null);
     if (previous && !keys.some((k) => k.kid === previous.publicJwk.kid)) {
       keys.push(previous.publicJwk);
     }
@@ -852,8 +1231,8 @@ export class Daywalker {
    * Check configuration and verify signature readiness.
    */
   public async selfCheck(): Promise<SelfCheckResult> {
-    const problems = [...this._config.problems];
-    const signingKey = await this.getLoadedSigningKey().catch((err) => {
+    const problems = [...this.#config.problems];
+    const signingKey = await this.#getLoadedSigningKey().catch((err) => {
       problems.push(`Signing key load error: ${(err as Error).message}`);
       return null;
     });
@@ -861,18 +1240,18 @@ export class Daywalker {
     if (!signingKey) {
       problems.push("DAYWALKER_SIGNING_KEY is not set: requests will be sent without RFC 9421 signature");
     }
-    await this.getLoadedPreviousSigningKey().catch((err) => {
+    await this.#getLoadedPreviousSigningKey().catch((err) => {
       problems.push(`Previous signing key load error: ${(err as Error).message}`);
     });
 
     const keyId = signingKey?.publicJwk.kid ?? null;
-    const offlineVerificationReady = Boolean(this._config.daywalkerPublicKey);
+    const offlineVerificationReady = Boolean(this.#config.daywalkerPublicKey) || this.#config.jwks === "auto";
 
     return {
       ok: problems.length === 0,
-      serviceSlug: this._config.serviceSlug,
-      serviceSlugs: this._config.serviceSlugs,
-      domain: this._config.domain,
+      serviceSlug: this.#config.serviceSlug,
+      serviceSlugs: this.#config.serviceSlugs,
+      domain: this.#config.domain,
       signing: Boolean(signingKey),
       keyId,
       offlineVerificationReady,
@@ -880,6 +1259,11 @@ export class Daywalker {
     };
   }
 }
+
+// Methods can't be replaced on the class or (by assignment) on an instance, so code elsewhere in the process
+// can't swap validateToken() for one that always says yes.
+Object.freeze(Daywalker.prototype);
+Object.freeze(Daywalker);
 
 /**
  * Factory function for creating instantiable Daywalker client instances.
@@ -915,5 +1299,10 @@ export const daywalker: Daywalker & (() => Daywalker) = new Proxy(
       }
       return getDefaultInstance();
     },
+    // The shared default client can't be patched through the proxy either.
+    set: () => false,
+    defineProperty: () => false,
+    deleteProperty: () => false,
+    setPrototypeOf: () => false,
   }
 );

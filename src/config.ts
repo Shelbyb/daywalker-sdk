@@ -13,7 +13,11 @@ export interface ResolvedConfig {
   domain: string | null;
   domainSource: string | null;
   daywalkerPublicKey: string | PublicJwk | PublicJwks | null;
+  /** "auto": offline verification keys come from `${authUrl}/.well-known/jwks.json` (env DAYWALKER_JWKS). */
+  jwks: "auto" | null;
   leaseIssuer: string | null;
+  /** Origin clients use to reach this service, for DPoP `htu` checks (env DAYWALKER_PUBLIC_ORIGIN). */
+  publicOrigin: string | null;
   authUrl: string;
   cacheTtlMs: number;
   negativeCacheTtlMs: number;
@@ -76,7 +80,7 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
  * Throws unless `value` is an https: URL (http: is allowed only for localhost / 127.0.0.1 / [::1]),
- * so API keys, SDK keys and write keys never travel in cleartext.
+ * so API keys, access tokens, SDK keys and write keys never travel in cleartext.
  */
 export function assertSecureUrl(name: string, value: string): void {
   let url: URL;
@@ -84,6 +88,9 @@ export function assertSecureUrl(name: string, value: string): void {
     url = new URL(value);
   } catch {
     throw new Error(`${name} must be an absolute https:// URL (got "${value}")`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${name} must not contain credentials`);
   }
   if (url.protocol === "https:") return;
   if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) return;
@@ -107,7 +114,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const apiKey = (options.apiKey ?? env.DAYWALKER_API_KEY ?? "").trim() || null;
   const serviceSlugs = parseServiceSlugs(options.serviceSlugs ?? options.serviceSlug ?? env.DAYWALKER_SERVICE_SLUG);
   const serviceSlug = serviceSlugs[0] ?? null;
-  if (!apiKey) problems.push("DAYWALKER_API_KEY is not set");
+  if (!apiKey) problems.push("DAYWALKER_API_KEY is not set: it is the client credential for the OAuth client credentials grant");
 
   const signingKey = options.signingKey ?? env.DAYWALKER_SIGNING_KEY ?? null;
   const previousSigningKey = options.previousSigningKey ?? env.DAYWALKER_SIGNING_KEY_PREVIOUS ?? null;
@@ -135,7 +142,16 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   }
 
   const daywalkerPublicKey = options.daywalkerPublicKey ?? (env.DAYWALKER_PUBLIC_KEY ? env.DAYWALKER_PUBLIC_KEY.trim() : null);
+  const rawJwks = String(options.jwks ?? env.DAYWALKER_JWKS ?? "").trim().toLowerCase();
+  const jwks = rawJwks === "auto" ? "auto" : null;
+  if (rawJwks && rawJwks !== "auto" && rawJwks !== "off") problems.push(`DAYWALKER_JWKS must be "auto" or "off" (got "${rawJwks.slice(0, 40)}"); JWKS fetching is off`);
   const leaseIssuer = (options.leaseIssuer ?? env.DAYWALKER_LEASE_ISSUER ?? "").trim() || null;
+  const rawPublicOrigin = (options.publicOrigin ?? env.DAYWALKER_PUBLIC_ORIGIN ?? "").trim();
+  let publicOrigin: string | null = null;
+  if (rawPublicOrigin) {
+    assertSecureUrl("publicOrigin", rawPublicOrigin);
+    publicOrigin = new URL(rawPublicOrigin).origin;
+  }
   const authUrl = (options.authUrl ?? env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
   assertSecureUrl("authUrl", authUrl);
   const cacheTtlMs = options.cacheTtlMs ?? 60_000;
@@ -161,7 +177,9 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     domain,
     domainSource,
     daywalkerPublicKey,
+    jwks,
     leaseIssuer,
+    publicOrigin,
     authUrl,
     cacheTtlMs,
     negativeCacheTtlMs,

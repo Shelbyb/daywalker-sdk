@@ -1,3 +1,4 @@
+import { webcrypto } from "./webcrypto.js";
 import { bytesToBase64, stringToUtf8 } from "./encoding.js";
 
 /** Default upper bound for body payload digest calculation (10MB). */
@@ -20,7 +21,7 @@ export async function computeContentDigest(
   if (data.byteLength > maxSizeBytes) {
     throw new Error(`Request body size (${data.byteLength} bytes) exceeds maximum allowed limit (${maxSizeBytes} bytes)`);
   }
-  const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", data as unknown as BufferSource);
+  const hashBuffer = await webcrypto.digest("SHA-256", data as unknown as BufferSource);
   const hashBase64 = bytesToBase64(new Uint8Array(hashBuffer));
   return `sha-256=:${hashBase64}:`;
 }
@@ -30,7 +31,7 @@ export async function computeContentDigest(
  */
 export async function sha256Base64(data: Uint8Array | string): Promise<string> {
   const bytes = typeof data === "string" ? stringToUtf8(data) : data;
-  const hashBuffer = await globalThis.crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
+  const hashBuffer = await webcrypto.digest("SHA-256", bytes as unknown as BufferSource);
   return bytesToBase64(new Uint8Array(hashBuffer));
 }
 

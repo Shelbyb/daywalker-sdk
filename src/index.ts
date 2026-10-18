@@ -4,6 +4,10 @@ export {
   daywalker,
   MAX_RETRY_AFTER_MS,
   MAX_VALIDATION_CACHE_ENTRIES,
+  MAX_CACHE_TTL_MS,
+  MAX_TOKEN_LENGTH,
+  JWKS_CACHE_TTL_MS,
+  JWKS_REFETCH_COOLDOWN_MS,
 } from "./client.js";
 
 export type {
@@ -21,6 +25,8 @@ export type {
   DaywalkerConfig,
   RateLimitWindow,
   TokenPayload,
+  IncomingDpop,
+  ValidateTokenOptions,
   ValidateErrorCode,
   ValidateResult,
   RetryOptions,
@@ -66,6 +72,9 @@ export {
   verifyJwtLease,
   leaseServices,
   registerPublicKey,
+  verifyDpopProof,
+  MAX_DPOP_PROOF_LENGTH,
+  DPOP_MAX_AGE_SECONDS,
   stringToUtf8,
   utf8ToString,
   bytesToBase64,
@@ -85,6 +94,7 @@ export type {
   VerifySignatureParams,
   VerifySignatureResult,
   ReplayStore,
+  VerifyDpopProofParams,
 } from "./crypto/index.js";
 
 export { buildTokenCookie, clearTokenCookie, daywalkerCookies, accessTokenUser } from "./cookies.js";
