@@ -140,6 +140,12 @@ export interface DaywalkerConfig {
   /** A JWK, a JWKS (`{ keys: [...] }`, selected by the lease's `kid`), PEM, or Base64 SPKI / raw key. */
   daywalkerPublicKey?: string | PublicJwk | PublicJwks;
   /**
+   * `"auto"` (env DAYWALKER_JWKS=auto) verifies access tokens offline against Daywalker's published key set,
+   * fetched from `${authUrl}/.well-known/jwks.json` only and cached, so signing-key rotation needs no
+   * redeploy. When no key set can be obtained, `daywalkerPublicKey` (if set) is used instead. Default off.
+   */
+  jwks?: "auto" | "off";
+  /**
    * Expected `iss` of offline-verified JWT leases (env DAYWALKER_LEASE_ISSUER). Daywalker documents no fixed
    * issuer, so `iss` is unchecked when unset; set it whenever leases from other issuers could share your key.
    */

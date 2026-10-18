@@ -28,6 +28,7 @@ import {
   type TokenSet,
   type GetTokensOptions,
   type PublicJwk,
+  type PublicJwks,
   type RateLimitWindow,
   type RetryOptions,
   type SelfCheckResult,
@@ -333,6 +334,47 @@ const MAX_ACCESS_TOKEN_LIFETIME_SECONDS = 3_600;
 /** Largest response body read from Daywalker Auth. */
 const MAX_RESPONSE_BYTES = 1_048_576;
 
+/** How long a fetched JWKS (`jwks: "auto"`) is used before it is refetched. */
+export const JWKS_CACHE_TTL_MS = 600_000;
+/**
+ * Least time between two JWKS fetches, whatever triggers them (an unknown `kid`, an expired set, a failed
+ * fetch), so a flood of tokens naming made-up `kid`s costs at most one request to Daywalker per interval.
+ */
+export const JWKS_REFETCH_COOLDOWN_MS = 30_000;
+/** Keys looked at in a fetched JWKS; the rest are ignored. */
+const MAX_JWKS_KEYS = 16;
+/** An Ed25519 public key: 32 bytes, unpadded base64url. */
+const ED25519_X_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/**
+ * The keys of a fetched JWKS that can verify Daywalker access tokens: Ed25519 signing keys for EdDSA with a
+ * `kid`, copied to fresh objects with nothing else on them. Anything else (RSA, EC, `alg: "none"`, private
+ * key material, encryption keys) is dropped.
+ */
+function usableJwks(keys: unknown): PublicJwk[] {
+  if (!Array.isArray(keys)) return [];
+  const out: PublicJwk[] = [];
+  for (const k of keys.slice(0, MAX_JWKS_KEYS)) {
+    if (!k || typeof k !== "object") continue;
+    const j = k as Record<string, unknown>;
+    if (j.kty !== "OKP" || j.crv !== "Ed25519" || typeof j.x !== "string" || !ED25519_X_PATTERN.test(j.x)) continue;
+    if ((j.alg !== undefined && j.alg !== "EdDSA") || (j.use !== undefined && j.use !== "sig") || j.d !== undefined) continue;
+    if (typeof j.kid !== "string" || j.kid === "" || j.kid.length > 256) continue;
+    out.push({ kty: "OKP", crv: "Ed25519", x: j.x, kid: j.kid, use: "sig", alg: "EdDSA" });
+  }
+  return out;
+}
+
+/** The `kid` a JWT's (unverified) header names, used only to pick a key; undefined when there is none. */
+function jwtKid(token: string): string | undefined {
+  try {
+    const header = JSON.parse(utf8ToString(base64UrlToBytes(token.split(".")[0] ?? "")));
+    return header && typeof header === "object" && typeof header.kid === "string" ? header.kid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** A copy of `value` that can't be changed: nested objects and arrays are frozen too. */
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
@@ -353,6 +395,10 @@ export class Daywalker {
   #previousSigningKeyPromise?: Promise<SigningKey>;
   readonly #cache = new Map<string, { result: ValidateResult; expiresAt: number; jkt?: string }>();
   readonly #inflight = new Map<string, Promise<ValidateResult>>();
+  /** The last JWKS fetched with usable keys (`jwks: "auto"`), kept when a later fetch fails. */
+  #jwks: { set: PublicJwks; fetchedAt: number } | null = null;
+  #jwksFlight: Promise<void> | null = null;
+  #jwksAttemptAt = -Infinity;
 
   constructor(config: DaywalkerConfig = {}) {
     // Everything is read once: changing the caller's config object later has no effect.
@@ -399,6 +445,7 @@ export class Daywalker {
       apiKey: maskSecret(this.#config.apiKey),
       signingKey: this.#config.signingKey ? "[configured]" : null,
       daywalkerPublicKey: this.#config.daywalkerPublicKey ? "[configured]" : null,
+      jwks: this.#config.jwks,
     };
   }
 
@@ -689,11 +736,14 @@ export class Daywalker {
       return cloneResult(cached.result);
     }
 
-    // Offline verification of Daywalker access tokens
-    if (this.#config.daywalkerPublicKey && token.split(".").length === 3) {
+    // Offline verification of Daywalker access tokens: against the fetched JWKS with `jwks: "auto"`, else
+    // (or while no key set can be obtained) against the configured public key.
+    const isJwt = token.split(".").length === 3;
+    const offlineKey = isJwt ? ((this.#config.jwks === "auto" ? await this.#jwksFor(jwtKid(token)) : null) ?? this.#config.daywalkerPublicKey) : null;
+    if (offlineKey) {
       const jwtResult = await verifyJwtLease({
         token,
-        publicKey: this.#config.daywalkerPublicKey,
+        publicKey: offlineKey,
         expectedServiceSlug: serviceSlug || undefined,
         expectedIssuer: this.#config.leaseIssuer ?? DEFAULT_ISSUER,
       });
@@ -737,12 +787,20 @@ export class Daywalker {
           message: jwtResult.error ?? "Offline token verification failed",
         };
       }
+    } else if (offlineOnly && isJwt && this.#config.jwks === "auto") {
+      // Fail closed: no key set, no offline verdict.
+      return {
+        ok: false,
+        error: "SERVICE_UNAVAILABLE",
+        status: 503,
+        message: "Offline verification failed: Daywalker's JWKS could not be fetched",
+      };
     } else if (offlineOnly) {
       return {
         ok: false,
         error: "CONFIGURATION_ERROR",
         status: 500,
-        message: "Offline verification requires DAYWALKER_PUBLIC_KEY and a Daywalker access token (JWT)",
+        message: "Offline verification requires DAYWALKER_PUBLIC_KEY or DAYWALKER_JWKS=auto and a Daywalker access token (JWT)",
       };
     }
 
@@ -1085,7 +1143,11 @@ export class Daywalker {
    * Fetches Daywalker's public JWKS (GET /.well-known/jwks.json) for offline lease verification.
    * Uses the configured `fetch`, sends no credentials, never follows redirects and times out after `timeoutMs`.
    */
-  public async fetchJwks(): Promise<{ keys: PublicJwk[] }> {
+  public fetchJwks(): Promise<{ keys: PublicJwk[] }> {
+    return this.#fetchJwks();
+  }
+
+  async #fetchJwks(): Promise<{ keys: PublicJwk[] }> {
     const doFetch = this.#fetch;
     const { signal, cleanup } = attemptSignal(undefined, this.#config.timeoutMs);
     let res: Response;
@@ -1111,6 +1173,43 @@ export class Daywalker {
       throw new DaywalkerError("JWKS response is not a JWK Set");
     }
     return { keys: json.keys as PublicJwk[] };
+  }
+
+  /**
+   * The key set to verify a token naming `kid` with (`jwks: "auto"`), or null when none could be obtained.
+   * The set is refetched once it is older than `JWKS_CACHE_TTL_MS`, or when it has no key with this `kid`
+   * (Daywalker rotated its key), but never sooner than `JWKS_REFETCH_COOLDOWN_MS` after the last attempt.
+   * Concurrent callers share one fetch. A failed fetch, or one with no usable key, keeps the previous set.
+   * Only `${authUrl}/.well-known/jwks.json` is ever fetched: a `jwks_uri` from anywhere is not followed.
+   */
+  async #jwksFor(kid: string | undefined): Promise<PublicJwks | null> {
+    const current = this.#jwks;
+    const stale = !current || Date.now() - current.fetchedAt >= JWKS_CACHE_TTL_MS;
+    const unknownKid = Boolean(current && kid !== undefined && !current.set.keys.some((k) => k.kid === kid));
+    if ((stale || unknownKid) && (this.#jwksFlight || Date.now() - this.#jwksAttemptAt >= JWKS_REFETCH_COOLDOWN_MS)) {
+      await this.#refreshJwks();
+    }
+    return this.#jwks?.set ?? null;
+  }
+
+  #refreshJwks(): Promise<void> {
+    if (!this.#jwksFlight) {
+      this.#jwksAttemptAt = Date.now();
+      this.#jwksFlight = this.#fetchJwks()
+        .then(
+          ({ keys }) => {
+            const usable = usableJwks(keys);
+            if (usable.length > 0) this.#jwks = { set: deepFreeze({ keys: usable }), fetchedAt: Date.now() };
+          },
+          () => {
+            // Keep the last good set; the cooldown spaces out the next attempt.
+          }
+        )
+        .finally(() => {
+          this.#jwksFlight = null;
+        });
+    }
+    return this.#jwksFlight;
   }
 
   /**
@@ -1146,7 +1245,7 @@ export class Daywalker {
     });
 
     const keyId = signingKey?.publicJwk.kid ?? null;
-    const offlineVerificationReady = Boolean(this.#config.daywalkerPublicKey);
+    const offlineVerificationReady = Boolean(this.#config.daywalkerPublicKey) || this.#config.jwks === "auto";
 
     return {
       ok: problems.length === 0,

@@ -13,6 +13,8 @@ export interface ResolvedConfig {
   domain: string | null;
   domainSource: string | null;
   daywalkerPublicKey: string | PublicJwk | PublicJwks | null;
+  /** "auto": offline verification keys come from `${authUrl}/.well-known/jwks.json` (env DAYWALKER_JWKS). */
+  jwks: "auto" | null;
   leaseIssuer: string | null;
   /** Origin clients use to reach this service, for DPoP `htu` checks (env DAYWALKER_PUBLIC_ORIGIN). */
   publicOrigin: string | null;
@@ -140,6 +142,9 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   }
 
   const daywalkerPublicKey = options.daywalkerPublicKey ?? (env.DAYWALKER_PUBLIC_KEY ? env.DAYWALKER_PUBLIC_KEY.trim() : null);
+  const rawJwks = String(options.jwks ?? env.DAYWALKER_JWKS ?? "").trim().toLowerCase();
+  const jwks = rawJwks === "auto" ? "auto" : null;
+  if (rawJwks && rawJwks !== "auto" && rawJwks !== "off") problems.push(`DAYWALKER_JWKS must be "auto" or "off" (got "${rawJwks.slice(0, 40)}"); JWKS fetching is off`);
   const leaseIssuer = (options.leaseIssuer ?? env.DAYWALKER_LEASE_ISSUER ?? "").trim() || null;
   const rawPublicOrigin = (options.publicOrigin ?? env.DAYWALKER_PUBLIC_ORIGIN ?? "").trim();
   let publicOrigin: string | null = null;
@@ -172,6 +177,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     domain,
     domainSource,
     daywalkerPublicKey,
+    jwks,
     leaseIssuer,
     publicOrigin,
     authUrl,

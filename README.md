@@ -70,6 +70,7 @@ The private key is never printed unless you pass `--print-key`.
 | `DAYWALKER_SIGNING_KEY_PREVIOUS` | during rotation | Previous private key, maintained during deployment transitions |
 | `DAYWALKER_DOMAIN` | optional | Optional caller identifier or host domain name |
 | `DAYWALKER_PUBLIC_KEY` | optional | Daywalker Auth public key for zero-egress offline JWT lease verification |
+| `DAYWALKER_JWKS` | optional | `auto` verifies access tokens offline against Daywalker's JWKS, fetched from `${DAYWALKER_AUTH_URL}/.well-known/jwks.json` and cached, so signing-key rotation needs no redeploy. Default `off`. See [Zero-Egress Offline Verification](#zero-egress-offline-verification) |
 | `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev`; must be `https://` (except localhost) |
 | `DAYWALKER_LEASE_ISSUER` | optional | Expected `iss` of offline-verified JWTs (default `https://auth.daywalker.dev`) |
 | `DAYWALKER_PUBLIC_ORIGIN` | behind a proxy | The origin clients use to reach this service (e.g. `https://api.example.com`), for checking DPoP proofs. Defaults to the request URL's origin |
@@ -301,6 +302,22 @@ const client = new Daywalker({
 // Verifies JWT signature, expiration, and service claims locally
 const result = await client.validateToken(incomingJwt);
 ```
+
+### Surviving Daywalker key rotation (`jwks: "auto"`)
+
+A static `DAYWALKER_PUBLIC_KEY` stops verifying the moment Daywalker rotates its signing key. Set `DAYWALKER_JWKS=auto` (or `jwks: "auto"`) and the client verifies against Daywalker's published key set instead:
+
+```ts
+const client = new Daywalker({ serviceSlug: "myservice", jwks: "auto" });
+```
+
+- The set is fetched from `${authUrl}/.well-known/jwks.json` and nowhere else: a `jwks_uri` in a token response or in the set itself is never followed. The fetch sends no credentials, follows no redirects, bypasses HTTP caches, is capped at 1 MiB and times out after `timeoutMs`.
+- Only Ed25519 signing keys for EdDSA with a `kid` are kept (`kty: OKP`, `crv: Ed25519`, `alg` absent or `EdDSA`, `use` absent or `sig`, no private part), at most 16. Everything else in the set is ignored.
+- The set is cached in the client for 10 minutes (`JWKS_CACHE_TTL_MS`). A token naming a `kid` the set doesn't have (a rotation) triggers a refetch, but fetches are never closer than 30 seconds apart (`JWKS_REFETCH_COOLDOWN_MS`), whatever triggers them, so tokens with made-up `kid`s can't make the client hammer Daywalker. Concurrent callers share one fetch.
+- A failed refresh (outage, redirect, non-JSON, no usable key) keeps the last good set.
+- Fail closed: while no set has ever been obtained, the static `daywalkerPublicKey` is used if one is configured; otherwise `offlineOnly` validation returns `503 SERVICE_UNAVAILABLE` and normal validation goes online (`POST /api/v1/tokens/validate`).
+
+Without `jwks: "auto"`, offline verification uses `daywalkerPublicKey` exactly as before.
 
 Tokens must be RFC 9068 access tokens (`typ: at+jwt`, `alg: EdDSA`) with a numeric `exp`, a `jti`, and an `aud` containing your service slug, so `serviceSlug` must be configured. A token that lists `services` must list yours too. A DPoP-bound token (`cnf.jkt`) is only accepted with `Authorization: DPoP` and a valid proof: right method and URL, signed by the bound key, fresh, carrying the token's hash, and never used before. A copied token alone is useless. With several instances, pass a shared `dpopReplayStore` (like `replayStore` for signatures). `result.data.services` is every service the lease covers (see [One API key, several services](#one-api-key-several-services)). Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
 

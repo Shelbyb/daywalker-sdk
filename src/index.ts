@@ -6,6 +6,8 @@ export {
   MAX_VALIDATION_CACHE_ENTRIES,
   MAX_CACHE_TTL_MS,
   MAX_TOKEN_LENGTH,
+  JWKS_CACHE_TTL_MS,
+  JWKS_REFETCH_COOLDOWN_MS,
 } from "./client.js";
 
 export type {
