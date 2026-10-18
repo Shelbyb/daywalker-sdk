@@ -26,6 +26,7 @@ export {
   generateSigningKey,
   loadSigningKey,
   loadPublicKey,
+  importSigningKey,
 } from "./keys.js";
 
 export {

@@ -116,6 +116,47 @@ export interface RetryOptions {
   retryNetworkErrors?: boolean;
 }
 
+/** A provisioned signing key as a `KeyStore` keeps it. Only keys already registered with Daywalker are stored. */
+export interface StoredSigningKey {
+  /** Record format version (1). */
+  version: 1;
+  /** RFC 7638 thumbprint of the public key; checked against the key on every load. */
+  keyId: string;
+  /** The domain the key is registered for. */
+  domain: string;
+  /** The Ed25519 private key, PKCS#8 DER in base64. */
+  privateKeyPkcs8Base64: string;
+  /** Unix seconds when it was registered. */
+  createdAt: number;
+}
+
+/**
+ * Where an auto-provisioned signing key lives between processes. On first use the client loads it; when
+ * there is none it generates a key, registers it with Daywalker (`POST /api/v1/keys/register`) and saves it
+ * with `saveIfAbsent`, which must be atomic (create-if-absent): when several instances start at once exactly
+ * one save wins and the others load the winner's key. A store without `saveIfAbsent` is read-only.
+ * Built in: `memoryKeyStore()` / `envKeyStore()` (`@shelbyb/daywalker-sdk/keystore`) and `fileKeyStore()`
+ * (`@shelbyb/daywalker-sdk/keystore/file`); Redis (`SET key value NX`), KV or a secrets manager fit too.
+ */
+export interface KeyStore {
+  load(): Promise<StoredSigningKey | null> | StoredSigningKey | null;
+  /** Saves `key` unless one is already stored. True when this call saved it, false when another key was there. */
+  saveIfAbsent?(key: StoredSigningKey): Promise<boolean> | boolean;
+}
+
+/**
+ * Signs with a key held elsewhere, typically a KMS or HSM, so the private key never exists in this process,
+ * its environment or its files. `sign` receives the RFC 9421 signature base and must return the raw 64-byte
+ * Ed25519 signature. Register the public key once (`registerPublicKey`); pass `publicJwk` so the first
+ * signature is checked against it before anything is sent.
+ */
+export interface MessageSigner {
+  /** The registered key's id (its RFC 7638 thumbprint, or the id you registered it under). */
+  keyId: string;
+  sign(data: Uint8Array): Promise<Uint8Array>;
+  publicJwk?: PublicJwk;
+}
+
 export interface DaywalkerConfig {
   /**
    * The OAuth client credential (env DAYWALKER_API_KEY). Sent only on the client credentials grant to
@@ -160,6 +201,14 @@ export interface DaywalkerConfig {
   publicOrigin?: string;
   /** Shared store for DPoP proof `jti`s (default: per-process memory). Needed with several instances. */
   dpopReplayStore?: ReplayStore;
+  /**
+   * Auto-provisioning: where the signing key is kept when `signingKey` / DAYWALKER_SIGNING_KEY isn't set.
+   * On first use the client loads it from here, or generates one, registers it for `domain` with the API key
+   * and saves it. Ignored when `signingKey` or `signer` is set.
+   */
+  keyStore?: KeyStore;
+  /** Signs requests with an external key (KMS / HSM) instead of a local one. Takes precedence over everything. */
+  signer?: MessageSigner;
   /** Per-attempt timeout for requests to Daywalker Auth. Default 5000ms; 0 disables. */
   timeoutMs?: number;
   fetch?: typeof fetch;
@@ -224,7 +273,10 @@ export interface SignRequestParams {
   path: string;
   authority: string;
   body?: string | Uint8Array | null;
-  key: SigningKey | string;
+  /** The local key to sign with. Not needed (and ignored) when `signer` is given. */
+  key?: SigningKey | string;
+  /** Signs with an external key instead (KMS / HSM); `keyid` defaults to `signer.keyId`. */
+  signer?: MessageSigner;
   created?: number;
   keyid?: string;
   alg?: string;

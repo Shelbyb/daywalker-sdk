@@ -1,5 +1,6 @@
 import { parseServiceSlugs, resolveConfig, type ResolvedConfig } from "./config.js";
-import { API_KEY_PATTERN, SERVICE_SLUG_PATTERN } from "./crypto/signatures.js";
+import { API_KEY_PATTERN, SAFE_IDENTIFIER_PATTERN, SERVICE_SLUG_PATTERN } from "./crypto/signatures.js";
+import { parseStoredSigningKey } from "./keystore/index.js";
 import {
   loadSigningKey,
   loadPublicKey,
@@ -12,6 +13,9 @@ import {
   generateDpopKey,
   createDpopProof,
   verifyDpopProof,
+  importSigningKey,
+  generateSigningKey,
+  registerPublicKey,
   base64UrlToBytes,
   utf8ToString,
   type DpopKey,
@@ -25,6 +29,9 @@ import {
   type IncomingDpop,
   type ReplayStore,
   type ValidateTokenOptions,
+  type KeyStore,
+  type MessageSigner,
+  type StoredSigningKey,
   type TokenSet,
   type GetTokensOptions,
   type PublicJwk,
@@ -342,6 +349,26 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+/** A `KeyStore` with its methods bound at construction. */
+type CapturedKeyStore = Readonly<{ load: KeyStore["load"]; saveIfAbsent?: NonNullable<KeyStore["saveIfAbsent"]> }>;
+
+/** What signs this client's requests, and where it came from. */
+type ActiveSigner = Readonly<{ signer: MessageSigner; publicJwk?: PublicJwk; source: "signer" | "signingKey" | "keyStore" }>;
+
+/** A local key as a signer; its private key never leaves the closure. */
+function localSigner(key: SigningKey, keyId: string, source: "signingKey" | "keyStore"): ActiveSigner {
+  const privateKey = key.privateKey;
+  return Object.freeze({
+    signer: Object.freeze({
+      keyId,
+      sign: async (data: Uint8Array) => new Uint8Array(await webcrypto.sign("Ed25519", privateKey, data as BufferSource)),
+      publicJwk: key.publicJwk,
+    }),
+    publicJwk: key.publicJwk,
+    source,
+  });
+}
+
 export class Daywalker {
   readonly #config: ResolvedConfig;
   /** The secret-free, frozen view handed out by `config`. */
@@ -349,6 +376,10 @@ export class Daywalker {
   readonly #fetch: typeof fetch;
   readonly #publicOrigin: string | null;
   readonly #dpopReplayStore: ReplayStore | undefined;
+  /** `config.signer` and `config.keyStore`, captured (methods bound) at construction so later edits can't swap them. */
+  readonly #externalSigner: MessageSigner | null;
+  readonly #keyStore: CapturedKeyStore | null;
+  #signerPromise: Promise<ActiveSigner | null> | null = null;
   #signingKeyPromise?: Promise<SigningKey>;
   #previousSigningKeyPromise?: Promise<SigningKey>;
   readonly #cache = new Map<string, { result: ValidateResult; expiresAt: number; jkt?: string }>();
@@ -381,6 +412,27 @@ export class Daywalker {
     this.#fetch = doFetch;
     this.#publicOrigin = resolved.publicOrigin;
     this.#dpopReplayStore = config.dpopReplayStore;
+    const signer = config.signer;
+    if (signer) {
+      if (typeof signer.sign !== "function" || typeof signer.keyId !== "string" || !SAFE_IDENTIFIER_PATTERN.test(signer.keyId)) {
+        throw new DaywalkerError("config.signer needs a sign() function and a keyId of 1-128 safe characters");
+      }
+      this.#externalSigner = Object.freeze({
+        keyId: signer.keyId,
+        sign: signer.sign.bind(signer),
+        publicJwk: signer.publicJwk ? Object.freeze({ ...signer.publicJwk }) : undefined,
+      });
+    } else {
+      this.#externalSigner = null;
+    }
+    const store = config.keyStore;
+    if (store && typeof store.load !== "function") throw new DaywalkerError("config.keyStore needs a load() function");
+    this.#keyStore = store
+      ? Object.freeze({
+          load: store.load.bind(store),
+          saveIfAbsent: typeof store.saveIfAbsent === "function" ? store.saveIfAbsent.bind(store) : undefined,
+        })
+      : null;
     // Instances of this class (not subclasses, which may still add fields) can't gain or change properties.
     if (new.target === Daywalker) Object.freeze(this);
   }
@@ -416,6 +468,130 @@ export class Daywalker {
       this.#signingKeyPromise = loadSigningKey(this.#config.signingKey as string);
     }
     return this.#signingKeyPromise;
+  }
+
+  /**
+   * What signs this client's requests, resolved once: `config.signer` (KMS / HSM), else `signingKey`
+   * (DAYWALKER_SIGNING_KEY), else the key in `keyStore`, provisioned on first use. Null when none is set up.
+   * A failure isn't remembered, so the next request tries again.
+   */
+  #getSigner(): Promise<ActiveSigner | null> {
+    if (!this.#signerPromise) {
+      this.#signerPromise = this.#resolveSigner().catch((err) => {
+        this.#signerPromise = null;
+        throw err;
+      });
+    }
+    return this.#signerPromise;
+  }
+
+  async #resolveSigner(): Promise<ActiveSigner | null> {
+    const external = this.#externalSigner;
+    if (external) {
+      if (external.publicJwk) {
+        // Prove once that the signer's key is the one claimed, before any request depends on it.
+        const { publicKey } = await loadPublicKey(external.publicJwk);
+        const challenge = webcrypto.getRandomValues(new Uint8Array(32));
+        const signature = await external.sign(challenge);
+        if (!(signature instanceof Uint8Array) || !(await webcrypto.verify("Ed25519", publicKey, signature as BufferSource, challenge as BufferSource))) {
+          throw new DaywalkerAuthError("config.signer does not sign with the key in its publicJwk", 500, "CONFIGURATION_ERROR");
+        }
+      }
+      return Object.freeze({ signer: external, publicJwk: external.publicJwk, source: "signer" as const });
+    }
+    const local = await this.#getLoadedSigningKey();
+    if (local) return localSigner(local, this.#config.keyId ?? local.publicJwk.kid, "signingKey");
+    if (this.#keyStore) {
+      const key = await this.#provisionFromStore(this.#keyStore);
+      return localSigner(key, key.publicJwk.kid, "keyStore");
+    }
+    return null;
+  }
+
+  async #loadStored(store: CapturedKeyStore): Promise<StoredSigningKey | null> {
+    const raw = await store.load();
+    return raw === null || raw === undefined ? null : parseStoredSigningKey(raw);
+  }
+
+  /** Imports a stored key (non-extractable) after checking it belongs to this service and matches its keyId. */
+  async #useStored(stored: StoredSigningKey): Promise<SigningKey> {
+    if (this.#config.domain && stored.domain !== this.#config.domain) {
+      throw new DaywalkerAuthError(
+        `The stored signing key is registered for ${stored.domain}, but this service is ${this.#config.domain}. Remove it from the key store to provision one for ${this.#config.domain}.`,
+        500,
+        "CONFIGURATION_ERROR"
+      );
+    }
+    const key = await importSigningKey(stored.privateKeyPkcs8Base64);
+    if (key.publicJwk.kid !== stored.keyId) {
+      throw new DaywalkerAuthError("The stored signing key does not match its keyId (corrupted or tampered with)", 500, "CONFIGURATION_ERROR");
+    }
+    return key;
+  }
+
+  /**
+   * Auto-provisioning. Loads the key from the store; when there is none, generates one, registers it for this
+   * service's domain (`POST /api/v1/keys/register`, with the API key) and saves it with `saveIfAbsent`. Only
+   * registered keys are ever stored, so a key planted in the store is never registered by this process. If
+   * another instance saved first, its key is used and the one registered here is reported for revocation.
+   */
+  async #provisionFromStore(store: CapturedKeyStore): Promise<SigningKey> {
+    const existing = await this.#loadStored(store);
+    if (existing) return this.#useStored(existing);
+    if (!store.saveIfAbsent) {
+      throw new DaywalkerAuthError("The key store is read-only and holds no signing key: provision one with `npx daywalker init`", 500, "CONFIGURATION_ERROR");
+    }
+    if (!this.#config.apiKey) {
+      throw new DaywalkerAuthError("DAYWALKER_API_KEY is needed to register a signing key on first use", 500, "CONFIGURATION_ERROR");
+    }
+    const domain = this.#config.domain;
+    if (!domain) {
+      throw new DaywalkerAuthError("No public domain detected to register a signing key for: set DAYWALKER_DOMAIN", 500, "CONFIGURATION_ERROR");
+    }
+
+    const generated = await generateSigningKey();
+    // Another instance may have finished while we generated: prefer its key over registering a second one.
+    const raced = await this.#loadStored(store);
+    if (raced) return this.#useStored(raced);
+
+    const registration = await registerPublicKey({
+      authUrl: this.#config.authUrl,
+      apiKey: this.#config.apiKey,
+      domain,
+      serviceSlug: this.#config.serviceSlugs.length > 0 ? this.#config.serviceSlugs.join(",") : undefined,
+      publicJwk: generated.publicJwk,
+      fetchFn: this.#fetch,
+    });
+    if (!registration.ok) {
+      const message = `Registering the signing key failed (${registration.status || "network"}): ${registration.error ?? "unknown error"}`;
+      if (registration.status === 0 || registration.status >= 500) throw new DaywalkerError(message, registration.status || undefined);
+      throw new DaywalkerAuthError(message, 503, "KEY_REGISTRATION_FAILED");
+    }
+
+    const record: StoredSigningKey = {
+      version: 1,
+      keyId: generated.publicJwk.kid,
+      domain,
+      privateKeyPkcs8Base64: generated.privateKeyPkcs8Base64!,
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+    if (await store.saveIfAbsent(record)) return this.#useStored(record);
+
+    const winner = await this.#loadStored(store);
+    if (!winner) throw new DaywalkerAuthError("The key store refused the signing key but holds none", 500, "CONFIGURATION_ERROR");
+    console.warn(
+      `[daywalker] Another instance stored its signing key first; key ${record.keyId} was registered for ${domain} but is unused. Revoke it in the Daywalker dashboard.`
+    );
+    return this.#useStored(winner);
+  }
+
+  /**
+   * Resolves the signing key now instead of on the first request: loads it, or provisions and registers it
+   * (see `keyStore`). Call it at startup to fail fast. Returns where the key came from and its id.
+   */
+  public async provisionSigningKey(): Promise<{ source: "signer" | "signingKey" | "keyStore"; keyId: string } | null> {
+    const active = await this.#getSigner();
+    return active ? { source: active.source, keyId: active.signer.keyId } : null;
   }
 
   #dpopKey: Promise<DpopKey> | null = null;
@@ -483,8 +659,8 @@ export class Daywalker {
     };
 
     callerSignal?.throwIfAborted();
-    const signingKey = await this.#getLoadedSigningKey();
-    const body = await prepareBody(rawBody, Boolean(signingKey));
+    const active = await this.#getSigner();
+    const body = await prepareBody(rawBody, Boolean(active));
     // The token endpoint authenticates itself (see _tokenRequest); everything else gets an OAuth access token.
     const isTokenEndpoint = url.pathname === TOKEN_PATH;
     const autoAuth = !isTokenEndpoint && !new Headers(init?.headers).has("authorization");
@@ -515,15 +691,14 @@ export class Daywalker {
         headers.set("dpop", await createDpopProof(await this.#getDpopKey(), { method, url: url.toString(), accessToken }));
       }
 
-      if (signingKey) {
-        // apiKey is left out so the signer can't replace an explicit Authorization header.
+      if (active) {
+        // Signing never touches Authorization, so an explicit header is kept as given.
         const signedHeaders = await signRequest({
           method,
           path: url.pathname + url.search,
           authority: url.host,
           body: body.bytes,
-          key: signingKey,
-          keyid: this.#config.keyId ?? undefined,
+          signer: active.signer,
           nonce: generateNonce(),
         });
 
@@ -1118,8 +1293,8 @@ export class Daywalker {
    * (`previousSigningKey`) during a rotation, so requests from instances still on the old key keep verifying.
    */
   public async keys(): Promise<{ keys: PublicJwk[] }> {
-    const key = await this.#getLoadedSigningKey();
-    const keys = key ? [key.publicJwk] : [];
+    const active = await this.#getSigner();
+    const keys = active?.publicJwk ? [active.publicJwk] : [];
     // A broken previous key must not take the current one offline; selfCheck() reports it.
     const previous = await this.#getLoadedPreviousSigningKey().catch(() => null);
     if (previous && !keys.some((k) => k.kid === previous.publicJwk.kid)) {
@@ -1129,33 +1304,57 @@ export class Daywalker {
   }
 
   /**
-   * Check configuration and verify signature readiness.
+   * Check configuration and verify signature readiness. Never provisions or registers a key: with a
+   * `keyStore` it only reads what is stored and reports what first use would need.
    */
   public async selfCheck(): Promise<SelfCheckResult> {
     const problems = [...this.#config.problems];
-    const signingKey = await this.#getLoadedSigningKey().catch((err) => {
-      problems.push(`Signing key load error: ${(err as Error).message}`);
-      return null;
-    });
+    let keyId: string | null = null;
+    let signing = false;
 
-    if (!signingKey) {
-      problems.push("DAYWALKER_SIGNING_KEY is not set: requests will be sent without RFC 9421 signature");
+    if (this.#externalSigner) {
+      signing = true;
+      keyId = this.#externalSigner.keyId;
+    } else if (this.#config.signingKey) {
+      const signingKey = await this.#getLoadedSigningKey().catch((err) => {
+        problems.push(`Signing key load error: ${(err as Error).message}`);
+        return null;
+      });
+      signing = Boolean(signingKey);
+      keyId = this.#config.keyId ?? signingKey?.publicJwk.kid ?? null;
+    } else if (this.#keyStore) {
+      const store = this.#keyStore;
+      try {
+        const stored = await this.#loadStored(store);
+        if (stored) {
+          await this.#useStored(stored);
+          keyId = stored.keyId;
+          signing = true;
+        } else if (!store.saveIfAbsent) {
+          problems.push("The key store is read-only and holds no signing key: provision one with `npx daywalker init`");
+        } else if (!this.#config.domain) {
+          problems.push("No public domain detected: set DAYWALKER_DOMAIN so a signing key can be registered on first use");
+        } else {
+          signing = true; // provisioned and registered on first use
+        }
+      } catch (err) {
+        problems.push(`Key store error: ${(err as Error).message}`);
+      }
+    } else {
+      problems.push("No signing key: set DAYWALKER_SIGNING_KEY (npx daywalker init), a keyStore for auto-provisioning, or a signer");
     }
     await this.#getLoadedPreviousSigningKey().catch((err) => {
       problems.push(`Previous signing key load error: ${(err as Error).message}`);
     });
-
-    const keyId = signingKey?.publicJwk.kid ?? null;
-    const offlineVerificationReady = Boolean(this.#config.daywalkerPublicKey);
 
     return {
       ok: problems.length === 0,
       serviceSlug: this.#config.serviceSlug,
       serviceSlugs: this.#config.serviceSlugs,
       domain: this.#config.domain,
-      signing: Boolean(signingKey),
+      signing,
       keyId,
-      offlineVerificationReady,
+      offlineVerificationReady: Boolean(this.#config.daywalkerPublicKey),
       problems,
     };
   }

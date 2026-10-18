@@ -14,6 +14,11 @@
 - **Breaking:** `validateServiceKey()`, `signRequest({ apiKey })`, the Express `daywalkerKeys()` key-pull endpoint (`/.well-known/daywalker-keys.json`; keys are registered by push with `POST /api/v1/keys/register`), the unused `src/signing.ts`, and the CLI's `--api-key <key>` flag (now an error; use `DAYWALKER_API_KEY` or `--api-key-stdin`).
 - **Breaking:** offline verification accepts only RFC 9068 access tokens: `typ: at+jwt`, `alg: EdDSA`, and the service in `aud`. Lease-era tokens (`typ: JWT`, a `serviceSlug` claim, `alg: ed25519`) are refused, and `leaseServices()` no longer reads `serviceSlug` / `service`.
 
+**Signing key provisioning**
+- New `keyStore` option: on first use the client loads its signing key from the store, or generates one, registers it for the detected domain (`POST /api/v1/keys/register`) and saves it with an atomic `saveIfAbsent`, so `DAYWALKER_SIGNING_KEY` no longer has to be copied into every environment. Built-in `fileKeyStore()` (`@shelbyb/daywalker-sdk/keystore/file`), `memoryKeyStore()` and read-only `envKeyStore()` (`@shelbyb/daywalker-sdk/keystore`); any store with create-if-absent semantics works. Only registered keys are stored; loads check the keyId thumbprint and domain; provisioned keys are non-extractable. New `client.provisionSigningKey()` and `importSigningKey()`.
+- New `signer` option for KMS / HSM keys: requests are signed through the callback, so the private key never exists in the app. It's checked once against `publicJwk` when given, and captured at construction. `signRequest()` accepts `signer` in place of `key`.
+- `selfCheck()` reports what first-use provisioning needs without provisioning anything.
+
 **Hardening**
 - **Breaking:** incoming DPoP-bound access tokens (`cnf.jkt`) need `Authorization: DPoP` and a valid DPoP proof (method, URL, key thumbprint, `ath`, fresh `iat`, single-use `jti`), checked even for cached results. New `verifyDpopProof()`, `publicOrigin` / `DAYWALKER_PUBLIC_ORIGIN` (for proxies) and `dpopReplayStore`.
 - **Breaking:** an online validation answer must name the service it was validated for, and that must be this service. A token for a sibling service the credentials also cover is refused with `403 SERVICE_NOT_GRANTED`; an answer naming no service fails closed (503). Adapters map 403 through.
