@@ -249,9 +249,11 @@ export function createSignatureBase(params: {
  * "content-digest" (whenever there is a body, and always for POST / PUT / PATCH).
  */
 export async function signRequest(params: SignRequestParams): Promise<SignedHeaders> {
-  const signingKey = await loadSigningKey(params.key);
+  const signer = params.signer;
+  if (!signer && !params.key) throw new Error("signRequest needs a key or a signer");
+  const signingKey = signer ? null : await loadSigningKey(params.key!);
   const created = params.created ?? Math.floor(Date.now() / 1000);
-  const keyid = params.keyid ?? signingKey.publicJwk.kid;
+  const keyid = params.keyid ?? (signer ? signer.keyId : signingKey!.publicJwk.kid);
   const alg = params.alg ?? SIGNATURE_ALG;
   const method = params.method.toUpperCase();
 
@@ -284,11 +286,13 @@ export async function signRequest(params: SignRequestParams): Promise<SignedHead
     components,
   });
 
-  const signatureBuffer = await webcrypto.sign(
-    "Ed25519",
-    signingKey.privateKey,
-    stringToUtf8(signatureBase) as unknown as BufferSource
-  );
+  const baseBytes = stringToUtf8(signatureBase);
+  const signatureBuffer = signer
+    ? await signer.sign(baseBytes)
+    : await webcrypto.sign("Ed25519", signingKey!.privateKey, baseBytes as unknown as BufferSource);
+  if (!(signatureBuffer instanceof ArrayBuffer || signatureBuffer instanceof Uint8Array) || signatureBuffer.byteLength !== 64) {
+    throw new Error("Signer must return a 64-byte Ed25519 signature");
+  }
 
   const signatureBase64 = bytesToBase64(new Uint8Array(signatureBuffer));
 
