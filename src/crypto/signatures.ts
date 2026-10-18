@@ -473,6 +473,18 @@ export async function verifyRequestSignature(
   }
 }
 
+/**
+ * Every service slug a (verified) JWT lease covers: its `services` claim, else its audience, else the
+ * single `serviceSlug` / `service` claim of leases issued before multi-service tokens.
+ */
+export function leaseServices(payload: Record<string, unknown>): string[] {
+  const strings = (v: unknown): string[] =>
+    (Array.isArray(v) ? v : v === undefined || v === null ? [] : [v]).filter((s): s is string => typeof s === "string" && s !== "");
+  const listed = strings(payload.services);
+  const fallback = listed.length > 0 ? listed : strings(payload.aud).length > 0 ? strings(payload.aud) : strings(payload.serviceSlug ?? payload.service);
+  return Array.from(new Set(fallback.map((s) => s.toLowerCase())));
+}
+
 /** Clock skew tolerated on JWT lease `exp` / `nbf`. */
 export const JWT_CLOCK_SKEW_SECONDS = 60;
 
@@ -577,6 +589,17 @@ export async function verifyJwtLease(params: {
       };
     }
 
+    // A lease that lists its services must list this one (belt and braces next to `aud`).
+    if (payload.services !== undefined) {
+      const listed = Array.isArray(payload.services) ? payload.services : null;
+      if (!listed || !listed.some((s: unknown) => typeof s === "string" && s.toLowerCase() === expected)) {
+        return {
+          valid: false,
+          error: `JWT services mismatch: expected ${expected}, got ${listed ? listed.map(String).join(", ").toLowerCase() : "(not a list)"}`,
+        };
+      }
+    }
+
     if (params.expectedIssuer && payload.iss !== params.expectedIssuer) {
       return { valid: false, error: `JWT issuer mismatch: expected ${params.expectedIssuer}, got ${payload.iss ?? "(none)"}` };
     }
@@ -623,6 +646,8 @@ export async function registerPublicKey(params: {
         keyId: params.publicJwk.kid,
         domain: params.domain,
         publicKey: params.publicJwk,
+        // Lets Daywalker refuse right away when the API key doesn't cover the service(s); a comma-separated list is fine
+        ...(params.serviceSlug ? { serviceSlug: params.serviceSlug } : {}),
       }),
     });
 

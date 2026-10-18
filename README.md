@@ -48,7 +48,7 @@ DAYWALKER_API_KEY=srv_live_... npx daywalker init --service my-service-slug --do
 
 `daywalker init`:
 - Generates an Ed25519 keypair locally using WebCrypto (`crypto.subtle`)
-- Registers the public JWK directly with `POST https://auth.daywalker.dev/api/v1/keys/register` (`Authorization: Bearer <API key>`, body `{ keyId, domain, publicKey }`; responds `201`)
+- Registers the public JWK directly with `POST https://auth.daywalker.dev/api/v1/keys/register` (`Authorization: Bearer <API key>`, body `{ keyId, domain, publicKey, serviceSlug }`; responds `201`, or `403 service_not_covered` when the API key doesn't cover the service)
 - Writes `DAYWALKER_SERVICE_SLUG`, `DAYWALKER_KEY_ID`, `DAYWALKER_SIGNING_KEY`, and `DAYWALKER_AUTH_URL` to `.env.local` (atomically, mode `0600`), and only after registration succeeds. `--skip-register` writes without registering.
 - `--force` replaces an existing key and keeps the old one as `DAYWALKER_SIGNING_KEY_PREVIOUS`
 - No route injectors or public `/.well-known/` endpoints needed
@@ -62,7 +62,7 @@ The private key is never printed unless you pass `--print-key`.
 | Variable | Required | Purpose |
 |---|---|---|
 | `DAYWALKER_API_KEY` | ✅ | The service's Daywalker API token (`srv_live_…`) or JWT lease |
-| `DAYWALKER_SERVICE_SLUG` | ✅ | The service slug to validate against (e.g. `sonalyze`) |
+| `DAYWALKER_SERVICE_SLUG` | ✅ | The service slug to validate against (e.g. `sonalyze`). One API key can cover several services: a comma-separated list (`gigpulse,devpulse`) is accepted and the first is the default. See [One API key, several services](#one-api-key-several-services) |
 | `DAYWALKER_SIGNING_KEY` | for signed requests | Ed25519 private key from `daywalker init` (PKCS#8 Base64 DER or PEM) |
 | `DAYWALKER_KEY_ID` | optional | RFC 7638 JWK thumbprint derived during key generation |
 | `DAYWALKER_SIGNING_KEY_PREVIOUS` | during rotation | Previous private key, maintained during deployment transitions |
@@ -198,6 +198,45 @@ app.get("/api/me", (req, res) => res.json({ auth: req.auth }));
 
 ---
 
+## One API Key, Several Services
+
+A Daywalker API token can cover several services (say `gigpulse` and `devpulse`) and carry one allowlist of domains and IPs, so you manage a single set of client credentials instead of one per service. Ask for the extra services when you create the token in the Daywalker dashboard (**Also cover these services**), or with `additionalServiceIds` on `POST /api/v1/tokens` and `PATCH /api/v1/tokens/:id`.
+
+**Each app keeps its own service slug, with the same API key.** Every app (domain) generates and registers its own signing key:
+
+```bash
+# gigpulse app
+DAYWALKER_API_KEY=srv_live_… npx daywalker init --service gigpulse --domain gigpulse.daywalker.dev
+# devpulse app, same API key
+DAYWALKER_API_KEY=srv_live_… npx daywalker init --service devpulse --domain devpulse.daywalker.dev
+```
+
+`init` and `rotate` fail right away with `service_not_covered` if the API key doesn't cover the slug you name. An app that serves several services lists them all, `--service gigpulse,devpulse` (`DAYWALKER_SERVICE_SLUG="gigpulse,devpulse"`); the first is the default for `validateToken()`, and `client.config.serviceSlugs` holds the list.
+
+**The JWT lists every service.** Once your backend has authenticated with its signed request, ask for a lease. It lists all the service slugs the token covers (and may use right now):
+
+```ts
+const lease = await client.issueLease();
+lease.services; // ["gigpulse", "devpulse"]; also the JWT's `services` and `aud` claims
+
+// Least privilege: only what this process needs. A service the key doesn't cover is refused (403 SERVICE_NOT_GRANTED).
+const narrow = await client.issueLease({ services: ["devpulse"], ttlSeconds: 3600 });
+```
+
+Services that are inactive, in `DRAFT`, `TESTING` (unless an admin owns the token), or no longer entitled to the token's owner are left out. Check `lease.services` rather than assuming.
+
+Whoever receives the lease verifies it for **their own** service. It only passes when that slug is in the lease's `services` and `aud`:
+
+```ts
+const verifier = new Daywalker({ serviceSlug: "devpulse", daywalkerPublicKey: process.env.DAYWALKER_PUBLIC_KEY });
+const result = await verifier.validateToken(incomingJwt);
+if (result.ok) result.data.services; // ["gigpulse", "devpulse"]: everything this lease covers
+```
+
+Online validation of an `srv_live_…` token reports the same list in `result.data.services` (a server that predates multi-service tokens yields just the validated slug).
+
+---
+
 ## Zero-Egress Offline Verification
 
 When high-throughput internal microservices need zero latency and zero external egress, Daywalker Auth can issue asymmetric JWT leases. Configure `DAYWALKER_PUBLIC_KEY` (PEM or standard JWK) and token validation runs entirely in memory without network calls:
@@ -214,7 +253,7 @@ const client = new Daywalker({
 const result = await client.validateToken(incomingJwt);
 ```
 
-Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) equal to your service slug, so `serviceSlug` must be configured. Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
+Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) containing your service slug, so `serviceSlug` must be configured. A lease that lists `services` must list yours too. `result.data.services` is every service the lease covers (see [One API key, several services](#one-api-key-several-services)). Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
 
 ---
 
@@ -222,9 +261,9 @@ Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) equal to your s
 
 | Command | Description |
 |---|---|
-| `npx daywalker init --service <slug> [--domain <host>] [--api-key-stdin] [--skip-register] [--force] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
+| `npx daywalker init --service <slug[,slug…]> [--domain <host>] [--api-key-stdin] [--skip-register] [--force] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
 | `npx daywalker check` | Validate configuration, signature readiness, and connection |
-| `npx daywalker rotate [--api-key-stdin] [--skip-register] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
+| `npx daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--skip-register] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
 
 ---
 
@@ -233,8 +272,8 @@ Leases must have a numeric `exp` and an `aud` (or `serviceSlug`) equal to your s
 | Endpoint | SDK usage | Notes |
 |---|---|---|
 | `POST /api/v1/tokens/validate` | `client.validateToken()` | Body `{ token, serviceSlug }`; signed with `Signature-Input`, `Signature`, `Content-Digest`. Errors: `400` (`DIGEST_MISMATCH`/missing fields), `401` (`INVALID_SIGNATURE`/invalid token), `403`, `429`. Response includes `valid`, `tokenId`, `tokenName`, `userId`, `stage`, `rateLimit`, `rateLimitHourly` and `X-RateLimit-*` / `X-RateLimit-Hourly-*` headers |
-| `POST /api/v1/keys/register` | `npx daywalker init` / `rotate` | Bearer auth; body `{ keyId, domain, publicKey }` |
-| `POST /api/v1/leases/issue` | `client.issueLease(ttlSeconds?)` | Signed request returns `{ lease, tokenType, expiresAt, jwksUri }` (EdDSA JWT) |
+| `POST /api/v1/keys/register` | `npx daywalker init` / `rotate` | Bearer auth; body `{ keyId, domain, publicKey, serviceSlug? }`; `403 service_not_covered` if the key doesn't cover `serviceSlug` |
+| `POST /api/v1/leases/issue` | `client.issueLease(ttlSeconds? \| { ttlSeconds?, services? })` | Signed request returns `{ lease, tokenType, expiresAt, jwksUri, services }` (EdDSA JWT listing every service the key covers; `services` narrows it) |
 | `GET /.well-known/jwks.json` | `client.fetchJwks()` | Daywalker public JWKS for offline lease verification |
 
 Inbound tokens may be supplied as `x-api-token: srv_live_...` or `Authorization: Bearer <JWT or API key>`.
