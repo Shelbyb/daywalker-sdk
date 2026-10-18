@@ -4,6 +4,10 @@
 
 # @shelbyb/daywalker-sdk
 
+[![npm](https://img.shields.io/npm/v/@shelbyb/daywalker-sdk)](https://www.npmjs.com/package/@shelbyb/daywalker-sdk)
+[![CI](https://github.com/Shelbyb/daywalker-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/Shelbyb/daywalker-sdk/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/@shelbyb/daywalker-sdk)](./LICENSE)
+
 Runtime-agnostic client library for [Daywalker Auth](https://auth.daywalker.dev). Supports **RFC 9421 (HTTP Message Signatures)**, **RFC 9530 (Digest Fields)**, **Web Crypto standards**, **Push Architecture key registration**, and **hardened web & Next.js middleware**.
 
 Runs on **Node.js 20.19+**, **Bun**, **Deno**, **Cloudflare Workers**, **Next.js Edge**, and browsers. ESM only; `require()` works on Node 20.19+ and 22.12+.
@@ -177,6 +181,23 @@ app.get("/api/me", (c) => {
 
 ---
 
+## Express / Connect / Node `http` (`@shelbyb/daywalker-sdk/express`)
+
+```ts
+import express from "express";
+import { daywalkerAuth, daywalkerKeys } from "@shelbyb/daywalker-sdk/express";
+
+const app = express();
+app.use(daywalkerKeys()); // serves GET /.well-known/daywalker-keys.json
+app.use("/api", daywalkerAuth({ serviceSlug: "sonalyze" }));
+
+app.get("/api/me", (req, res) => res.json({ auth: req.auth }));
+```
+
+`daywalkerAuth` reads `Authorization: Bearer <token>` or `x-api-token`, answers `401` when neither is present, and otherwise returns the same status codes as the other middleware (`429` with `Retry-After`, `503` when Daywalker is unreachable). On success the validated payload is on `req.auth`. Both functions also work with plain `http.createServer` handlers.
+
+---
+
 ## Zero-Egress Offline Verification
 
 When high-throughput internal microservices need zero latency and zero external egress, Daywalker Auth can issue asymmetric JWT leases. Configure `DAYWALKER_PUBLIC_KEY` (PEM or standard JWK) and token validation runs entirely in memory without network calls:
@@ -254,6 +275,18 @@ import { createAnalytics } from "@shelbyb/daywalker-sdk/analytics";
 const flags = createClient(clientSideId, { kind: "user", key: user.id }, { baseUrl: "https://devpulse.example.com" });
 const analytics = createAnalytics({ writeKey: "dpa_…", host: "https://devpulse.example.com", flags }); // events carry $feature/<key>
 ```
+
+---
+
+## Provenance & Releases
+
+Releases are published from GitHub Actions ([`publish.yml`](./.github/workflows/publish.yml)) with [npm trusted publishing](https://docs.npmjs.com/trusted-publishers): npm accepts a short-lived OIDC token from this repository's workflow, so there is no long-lived npm token anywhere. Each version carries a signed [provenance attestation](https://docs.npmjs.com/generating-provenance-statements) linking it to the commit and workflow run that built it. Check it on the npm page, or after installing:
+
+```bash
+npm audit signatures
+```
+
+To cut a release (maintainers): bump `version` in `package.json`, add a `CHANGELOG.md` entry, merge to `main`, then either push a matching tag (`git tag v0.5.0 && git push origin v0.5.0`) or run the **Publish** workflow from `main` with the version. The workflow refuses tags not on `main`, versions that don't match `package.json`, and versions already on npm. Tests and packing run in a job without the OIDC token; only the final job, which uploads the tested tarball, can publish.
 
 ---
 
