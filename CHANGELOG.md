@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+No code changes.
+- Published from GitHub Actions with npm trusted publishing (OIDC) and a provenance attestation, instead of from a maintainer's machine.
+- Publish workflow: runs never overlap, and a version already on npm fails early with a clear error.
+- README: badges, the `./express` entry point, and how releases and provenance work.
+
 ## 0.4.0
 Security and reliability fixes from an audit of the whole package. Several are **breaking**; read those before upgrading from 0.3.
 
