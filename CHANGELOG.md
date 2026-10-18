@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.1
 - `fetchBundle()` errors now name the request and HTTP status (`Bundle request for <slug> failed (HTTP 401): ...`) and always carry a code: the service's `code`/`error`, otherwise derived from the status (`INVALID_TOKEN`, `FORBIDDEN`, `SERVICE_NOT_FOUND`, `RATE_LIMITED`, `SERVICE_UNAVAILABLE`, `BUNDLE_REQUEST_FAILED`).
 
 ## 0.9.0
