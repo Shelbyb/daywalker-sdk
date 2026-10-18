@@ -33,7 +33,7 @@ async function setup(opts: { withLicense?: boolean; tokenError?: Response; bundl
         refresh_token: `rt_${grants}`, refresh_expires_in: 3600, services: ["svc"],
       };
       if (opts.withLicense !== false && JSON.parse(String(init?.body)).grant_type === "client_credentials") {
-        const lic = { licenseKey: hex("svc", key.keyId, win), expiresAt: new Date((win + 1) * WINDOW).toISOString() };
+        const lic = { licenseKey: hex("svc", key.publicJwk.kid, win), expiresAt: new Date(Date.now() + WINDOW).toISOString() };
         Object.assign(body, { ...lic, licenseExpiresAt: lic.expiresAt, licenses: { svc: lic } });
       }
       return Response.json(body);
@@ -41,8 +41,8 @@ async function setup(opts: { withLicense?: boolean; tokenError?: Response; bundl
     if (u.pathname === "/api/v1/services/svc/bundle") {
       if (opts.bundleError) return opts.bundleError.clone();
       const win = Math.floor(Date.now() / WINDOW) + (opts.bundleWindowOffset ?? 0);
-      const payload = { serviceSlug: "svc", dataKeySalt: "abc", features: { stage: "LIVE" }, issuedAt: new Date().toISOString(), expiresAt: new Date((win + 1) * WINDOW).toISOString() };
-      return Response.json({ serviceSlug: "svc", bundle: seal(hex("svc", key.keyId, win), payload) });
+      const payload = { serviceSlug: "svc", dataKeySalt: "abc", features: { stage: "LIVE" }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + WINDOW).toISOString() };
+      return Response.json({ serviceSlug: "svc", bundle: seal(hex("svc", key.publicJwk.kid, win), payload) });
     }
     return Response.json({});
   }) as typeof globalThis.fetch;
