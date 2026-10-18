@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 **One API key, several services.** Needs Daywalker Auth with multi-service tokens; the SDK also works unchanged against older servers.
 - `client.issueLease()` returns `services`, every service slug the JWT lease covers (its `services` and `aud` claims). It takes `{ ttlSeconds?, services? }` (a bare number still works); `services` narrows the lease, and a service the key doesn't cover is refused with `403 SERVICE_NOT_GRANTED`.
 - `validateToken()` reports `data.services`: the services an offline-verified lease covers, or the ones an online-validated token covers (just the validated slug against older servers).
