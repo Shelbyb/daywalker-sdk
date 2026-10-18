@@ -1,3 +1,4 @@
+import { webcrypto } from "./webcrypto.js";
 import type { PublicJwk, PublicJwks, SigningKey } from "../types.js";
 import {
   base64ToBytes,
@@ -36,19 +37,19 @@ export async function calculateJwkThumbprint(jwk: {
  * Generate a new Ed25519 keypair using WebCrypto.
  */
 export async function generateSigningKey(): Promise<SigningKey> {
-  const keyPair = (await globalThis.crypto.subtle.generateKey("Ed25519", true, [
+  const keyPair = (await webcrypto.generateKey("Ed25519", true, [
     "sign",
     "verify",
   ])) as CryptoKeyPair;
 
-  const jwk = (await globalThis.crypto.subtle.exportKey("jwk", keyPair.privateKey)) as {
+  const jwk = (await webcrypto.exportKey("jwk", keyPair.privateKey)) as {
     kty: "OKP";
     crv: "Ed25519";
     x: string;
     d?: string;
   };
 
-  const pkcs8Buffer = await globalThis.crypto.subtle.exportKey("pkcs8", keyPair.privateKey);
+  const pkcs8Buffer = await webcrypto.exportKey("pkcs8", keyPair.privateKey);
   const privateKeyPkcs8Base64 = bytesToBase64(new Uint8Array(pkcs8Buffer));
 
   const kid = await calculateJwkThumbprint({ crv: "Ed25519", kty: "OKP", x: jwk.x });
@@ -85,14 +86,14 @@ export async function loadSigningKey(raw: string | SigningKey): Promise<SigningK
     try {
       const parsed = JSON.parse(trimmed);
       if (parsed.kty === "OKP" && parsed.crv === "Ed25519" && parsed.d) {
-        const privateKey = await globalThis.crypto.subtle.importKey(
+        const privateKey = await webcrypto.importKey(
           "jwk",
           parsed,
           "Ed25519",
           true,
           ["sign"]
         );
-        const jwk = (await globalThis.crypto.subtle.exportKey("jwk", privateKey)) as {
+        const jwk = (await webcrypto.exportKey("jwk", privateKey)) as {
           x: string;
         };
         const kid = parsed.kid || (await calculateJwkThumbprint({ crv: "Ed25519", kty: "OKP", x: jwk.x }));
@@ -104,14 +105,14 @@ export async function loadSigningKey(raw: string | SigningKey): Promise<SigningK
           use: "sig",
           alg: "EdDSA",
         };
-        const publicKey = await globalThis.crypto.subtle.importKey(
+        const publicKey = await webcrypto.importKey(
           "jwk",
           { kty: "OKP", crv: "Ed25519", x: jwk.x },
           "Ed25519",
           true,
           ["verify"]
         );
-        const pkcs8Buffer = await globalThis.crypto.subtle.exportKey("pkcs8", privateKey);
+        const pkcs8Buffer = await webcrypto.exportKey("pkcs8", privateKey);
         return {
           privateKey,
           publicKey,
@@ -150,7 +151,7 @@ export async function loadSigningKey(raw: string | SigningKey): Promise<SigningK
 
   let privateKey: CryptoKey;
   try {
-    privateKey = await globalThis.crypto.subtle.importKey(
+    privateKey = await webcrypto.importKey(
       "pkcs8",
       keyBytes as unknown as BufferSource,
       "Ed25519",
@@ -161,7 +162,7 @@ export async function loadSigningKey(raw: string | SigningKey): Promise<SigningK
     throw new Error(`Failed to import Ed25519 private key: ${(err as Error).message}`);
   }
 
-  const jwk = (await globalThis.crypto.subtle.exportKey("jwk", privateKey)) as {
+  const jwk = (await webcrypto.exportKey("jwk", privateKey)) as {
     x: string;
   };
   const kid = await calculateJwkThumbprint({ crv: "Ed25519", kty: "OKP", x: jwk.x });
@@ -174,7 +175,7 @@ export async function loadSigningKey(raw: string | SigningKey): Promise<SigningK
     alg: "EdDSA",
   };
 
-  const publicKey = await globalThis.crypto.subtle.importKey(
+  const publicKey = await webcrypto.importKey(
     "jwk",
     { kty: "OKP", crv: "Ed25519", x: jwk.x },
     "Ed25519",
@@ -216,7 +217,7 @@ export async function loadPublicKey(
     return loadPublicKey(selectJwk(raw, kid));
   }
   if (typeof raw === "object" && "type" in raw && raw.type === "public") {
-    const exported = (await globalThis.crypto.subtle.exportKey("jwk", raw as CryptoKey)) as {
+    const exported = (await webcrypto.exportKey("jwk", raw as CryptoKey)) as {
       x: string;
       kid?: string;
     };
@@ -236,7 +237,7 @@ export async function loadPublicKey(
 
   if (typeof raw === "object" && "kty" in raw && raw.kty === "OKP" && raw.crv === "Ed25519") {
     const kid = raw.kid || (await calculateJwkThumbprint({ crv: "Ed25519", kty: "OKP", x: raw.x }));
-    const publicKey = await globalThis.crypto.subtle.importKey(
+    const publicKey = await webcrypto.importKey(
       "jwk",
       { kty: "OKP", crv: "Ed25519", x: raw.x },
       "Ed25519",
@@ -298,7 +299,7 @@ export async function loadPublicKey(
   if (keyBytes.length === 32) {
     const x = bytesToBase64Url(keyBytes);
     const kid = await calculateJwkThumbprint({ crv: "Ed25519", kty: "OKP", x });
-    const publicKey = await globalThis.crypto.subtle.importKey(
+    const publicKey = await webcrypto.importKey(
       "jwk",
       { kty: "OKP", crv: "Ed25519", x },
       "Ed25519",
@@ -320,14 +321,14 @@ export async function loadPublicKey(
 
   // Try SPKI format
   try {
-    const publicKey = await globalThis.crypto.subtle.importKey(
+    const publicKey = await webcrypto.importKey(
       "spki",
       keyBytes as unknown as BufferSource,
       "Ed25519",
       true,
       ["verify"]
     );
-    const jwk = (await globalThis.crypto.subtle.exportKey("jwk", publicKey)) as {
+    const jwk = (await webcrypto.exportKey("jwk", publicKey)) as {
       x: string;
     };
     const kid = await calculateJwkThumbprint({ crv: "Ed25519", kty: "OKP", x: jwk.x });

@@ -27,11 +27,11 @@ describe("Online validation fails closed", () => {
   for (const [name, res] of [
     ["a 200 HTML page", () => new Response("<html>captive portal</html>", { status: 200 })],
     ["a 200 empty object", () => Response.json({})],
-    ["a 200 array", () => Response.json([{ valid: true }])],
+    ["a 200 array", () => Response.json([{ valid: true, serviceSlug: "svc" }])],
     ["valid: 'true' (string)", () => Response.json({ valid: "true", tenantId: "t" })],
-    ["valid: true with a bad rateLimit", () => Response.json({ valid: true, rateLimit: "lots" })],
-    ["valid: true with a non-string tenantId", () => Response.json({ valid: true, tenantId: { admin: true } })],
-    ["valid: true with array data", () => Response.json({ valid: true, data: [] })],
+    ["valid: true with a bad rateLimit", () => Response.json({ valid: true, serviceSlug: "svc", rateLimit: "lots" })],
+    ["valid: true with a non-string tenantId", () => Response.json({ valid: true, serviceSlug: "svc", tenantId: { admin: true } })],
+    ["valid: true with array data", () => Response.json({ valid: true, serviceSlug: "svc", data: [] })],
   ] as const) {
     it(`rejects ${name} with SERVICE_UNAVAILABLE and never caches it`, async () => {
       let calls = 0;
@@ -76,7 +76,7 @@ describe("Online validation fails closed", () => {
 
   it("hands every caller its own copy of a cached result", async () => {
     let calls = 0;
-    const dw = client(async () => (calls++, Response.json({ valid: true, tenantId: "t1", rateLimit: { limit: 5, remaining: 4, reset: 1 } })));
+    const dw = client(async () => (calls++, Response.json({ valid: true, serviceSlug: "svc", tenantId: "t1", rateLimit: { limit: 5, remaining: 4, reset: 1 } })));
     const [a, b] = await Promise.all([dw.validateToken("tok"), dw.validateToken("tok")]);
     assert.ok(a.ok && b.ok);
     assert.notStrictEqual(a, b);
@@ -409,7 +409,7 @@ describe("Keys, rotation and JWT strictness", () => {
   const now = Math.floor(Date.now() / 1000);
   const enc = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
   const jwt = (key: crypto.KeyObject, header: Record<string, unknown>, payload: Record<string, unknown> = { aud: "svc", exp: now + 600 }) => {
-    const h = enc({ alg: "EdDSA", typ: "JWT", ...header });
+    const h = enc({ alg: "EdDSA", typ: "at+jwt", ...header });
     const p = enc({ jti: "j1", iss: "https://auth.daywalker.dev", ...payload });
     return `${h}.${p}.${crypto.sign(null, Buffer.from(`${h}.${p}`), key).toString("base64url")}`;
   };
@@ -484,7 +484,7 @@ describe("OAuth access tokens instead of the API key", () => {
         auths.push(new Headers(init?.headers).get("authorization")!);
         return auths.length === 1
           ? Response.json({ error: "ACCESS_TOKEN_EXPIRED", message: "expired" }, { status: 401 })
-          : Response.json({ valid: true, tenantId: "t" });
+          : Response.json({ valid: true, serviceSlug: "svc", tenantId: "t" });
       }, { log }),
     });
     assert.strictEqual((await dw.validateToken("tok")).ok, true);
@@ -499,7 +499,7 @@ describe("OAuth access tokens instead of the API key", () => {
       env,
       apiKey: "srv_live_revoked",
       serviceSlug: "svc",
-      fetch: withOAuth(async () => (validateCalls++, Response.json({ valid: true })), {
+      fetch: withOAuth(async () => (validateCalls++, Response.json({ valid: true, serviceSlug: "svc" })), {
         tokenResponse: () => Response.json({ error: "invalid_client", code: "INVALID_API_KEY", message: "bad key" }, { status: 401 }),
       }),
     });
@@ -513,7 +513,7 @@ describe("OAuth access tokens instead of the API key", () => {
     assert.strictEqual(validateCalls, 0);
     assert.strictEqual((await rejected.validateServiceCredentials()).ok, false);
 
-    const unconfigured = new Daywalker({ env, serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true })) });
+    const unconfigured = new Daywalker({ env, serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true, serviceSlug: "svc" })) });
     const missing = await unconfigured.validateToken("tok");
     assert.deepStrictEqual(missing.ok ? null : [missing.status, missing.error], [500, "CONFIGURATION_ERROR"]);
   });

@@ -1,11 +1,13 @@
 import { daywalker, Daywalker } from "./client.js";
-import { toAuthFailureResponse } from "./middleware.js";
+import { readCredentials, toAuthFailureResponse } from "./middleware.js";
 import type { TokenPayload } from "./types.js";
 
 interface Req {
   method?: string;
   path?: string;
   url?: string;
+  originalUrl?: string;
+  protocol?: string;
   headers?: Record<string, string | string[] | undefined>;
   get?: (name: string) => string | undefined;
   auth?: TokenPayload;
@@ -27,37 +29,29 @@ export function daywalkerAuth(options: { client?: Daywalker; serviceSlug?: strin
   const serviceSlug = options.serviceSlug;
 
   return async (req: Req, res: Res, next?: (err?: unknown) => void) => {
-    const getHeader = (name: string): string | undefined => {
+    const getHeader = (name: string): string | string[] | undefined => {
+      if (req.headers) return req.headers[name.toLowerCase()];
       if (typeof req.get === "function") return req.get(name);
-      if (req.headers) {
-        const val = req.headers[name.toLowerCase()] ?? req.headers[name];
-        return Array.isArray(val) ? val[0] : val;
-      }
       return undefined;
     };
+    const host = typeof getHeader("host") === "string" ? (getHeader("host") as string) : "localhost";
+    // The origin only matters for DPoP proofs, and is replaced by the client's `publicOrigin` when set.
+    const url = `${req.protocol === "https" ? "https" : "http"}://${/^[A-Za-z0-9.:[\]-]+$/.test(host) ? host : "localhost"}${req.originalUrl ?? req.url ?? "/"}`;
+    const credentials = readCredentials(getHeader, { method: req.method ?? "GET", url });
 
-    const authHeader = getHeader("authorization");
-    const apiTokenHeader = getHeader("x-api-token");
-
-    let token: string | null = null;
-    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
-      token = authHeader.slice(7).trim();
-    } else if (apiTokenHeader) {
-      token = apiTokenHeader.trim();
-    }
-
-    if (!token) {
+    if (!credentials.ok) {
+      const body = { error: "INVALID_TOKEN", message: credentials.message };
       if (typeof res.status === "function" && typeof res.json === "function") {
-        res.status(401).json({ error: "INVALID_TOKEN", message: "Missing Authorization header or x-api-token" });
+        res.status(401).json(body);
         return;
       }
       res.statusCode = 401;
       res.setHeader("Content-Type", "application/json");
-      res.end(JSON.stringify({ error: "INVALID_TOKEN", message: "Missing Authorization header or x-api-token" }));
+      res.end(JSON.stringify(body));
       return;
     }
 
-    const result = await client.validateToken(token, { serviceSlug });
+    const result = await client.validateToken(credentials.token, { serviceSlug, dpop: credentials.dpop });
     if (!result.ok) {
       const { status, ...body } = toAuthFailureResponse(result);
       if (body.retryAfter) {
@@ -74,21 +68,6 @@ export function daywalkerAuth(options: { client?: Daywalker; serviceSlug?: strin
     }
 
     req.auth = result.data;
-    next?.();
-  };
-}
-
-export function daywalkerKeys(client: Daywalker = daywalker) {
-  return async (req: Req, res: Res, next?: () => void) => {
-    const path = req.path ?? (req.url ?? "").split("?")[0];
-    if ((req.method ?? "GET") === "GET" && path === "/.well-known/daywalker-keys.json") {
-      const keysDoc = await client.keys();
-      res.statusCode = 200;
-      res.setHeader("Content-Type", "application/json");
-      res.setHeader("Cache-Control", "public, max-age=300");
-      res.end(JSON.stringify(keysDoc));
-      return;
-    }
     next?.();
   };
 }

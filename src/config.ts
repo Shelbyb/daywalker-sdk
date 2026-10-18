@@ -14,6 +14,8 @@ export interface ResolvedConfig {
   domainSource: string | null;
   daywalkerPublicKey: string | PublicJwk | PublicJwks | null;
   leaseIssuer: string | null;
+  /** Origin clients use to reach this service, for DPoP `htu` checks (env DAYWALKER_PUBLIC_ORIGIN). */
+  publicOrigin: string | null;
   authUrl: string;
   cacheTtlMs: number;
   negativeCacheTtlMs: number;
@@ -85,6 +87,9 @@ export function assertSecureUrl(name: string, value: string): void {
   } catch {
     throw new Error(`${name} must be an absolute https:// URL (got "${value}")`);
   }
+  if (url.username || url.password) {
+    throw new Error(`${name} must not contain credentials`);
+  }
   if (url.protocol === "https:") return;
   if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) return;
   throw new Error(`${name} must use https:// (http:// is only allowed for localhost); got "${value}"`);
@@ -136,6 +141,12 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
 
   const daywalkerPublicKey = options.daywalkerPublicKey ?? (env.DAYWALKER_PUBLIC_KEY ? env.DAYWALKER_PUBLIC_KEY.trim() : null);
   const leaseIssuer = (options.leaseIssuer ?? env.DAYWALKER_LEASE_ISSUER ?? "").trim() || null;
+  const rawPublicOrigin = (options.publicOrigin ?? env.DAYWALKER_PUBLIC_ORIGIN ?? "").trim();
+  let publicOrigin: string | null = null;
+  if (rawPublicOrigin) {
+    assertSecureUrl("publicOrigin", rawPublicOrigin);
+    publicOrigin = new URL(rawPublicOrigin).origin;
+  }
   const authUrl = (options.authUrl ?? env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
   assertSecureUrl("authUrl", authUrl);
   const cacheTtlMs = options.cacheTtlMs ?? 60_000;
@@ -162,6 +173,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     domainSource,
     daywalkerPublicKey,
     leaseIssuer,
+    publicOrigin,
     authUrl,
     cacheTtlMs,
     negativeCacheTtlMs,

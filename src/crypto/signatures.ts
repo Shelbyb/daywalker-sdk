@@ -1,3 +1,4 @@
+import { webcrypto } from "./webcrypto.js";
 import type { PublicJwk, PublicJwks, ReplayStore, SigningKey, SignedHeaders, SignRequestParams, VerifySignatureParams, VerifySignatureResult } from "../types.js";
 import {
   base64ToBytes,
@@ -7,16 +8,21 @@ import {
   stringToUtf8,
   utf8ToString,
   timingSafeEqualString,
+  redactSecrets,
 } from "./encoding.js";
 import { computeContentDigest } from "./digest.js";
 import { loadPublicKey, loadSigningKey } from "./keys.js";
-import { assertSecureUrl } from "../config.js";
+import { assertSecureUrl, parseServiceSlugs, publicHostname } from "../config.js";
 
 export const SIGNATURE_VERSION = "rfc9421";
 export const SIGNATURE_LABEL = "sig1";
 export const SIGNATURE_ALG = "ed25519";
 export const MAX_CLOCK_SKEW_SECONDS = 300;
 export const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9_\-\.]{1,128}$/;
+/** A Daywalker service slug. */
+export const SERVICE_SLUG_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/** An API key: printable, no whitespace, quotes or separators that could break out of a header. */
+export const API_KEY_PATTERN = /^[A-Za-z0-9_.~+\/=-]{8,512}$/;
 
 /**
  * Splits a request target into its RFC 9421 "@path" value (§2.2.6; dot segments resolved and repeated
@@ -278,7 +284,7 @@ export async function signRequest(params: SignRequestParams): Promise<SignedHead
     components,
   });
 
-  const signatureBuffer = await globalThis.crypto.subtle.sign(
+  const signatureBuffer = await webcrypto.sign(
     "Ed25519",
     signingKey.privateKey,
     stringToUtf8(signatureBase) as unknown as BufferSource
@@ -293,10 +299,6 @@ export async function signRequest(params: SignRequestParams): Promise<SignedHead
 
   if (contentDigest !== null) {
     headers["Content-Digest"] = contentDigest;
-  }
-
-  if (params.apiKey) {
-    headers["Authorization"] = `Bearer ${params.apiKey}`;
   }
 
   return headers;
@@ -444,7 +446,7 @@ export async function verifyRequestSignature(
 
     const { publicKey } = await loadPublicKey(params.publicKey, keyid);
 
-    const isValid = await globalThis.crypto.subtle.verify(
+    const isValid = await webcrypto.verify(
       "Ed25519",
       publicKey,
       signatureBytes as unknown as BufferSource,
@@ -473,27 +475,27 @@ export async function verifyRequestSignature(
   }
 }
 
-/**
- * Every service slug a (verified) JWT lease covers: its `services` claim, else its audience, else the
- * single `serviceSlug` / `service` claim of leases issued before multi-service tokens.
- */
+/** Every service slug a (verified) access token covers: its `services` claim, else its audience. */
 export function leaseServices(payload: Record<string, unknown>): string[] {
   const strings = (v: unknown): string[] =>
     (Array.isArray(v) ? v : v === undefined || v === null ? [] : [v]).filter((s): s is string => typeof s === "string" && s !== "");
   const listed = strings(payload.services);
-  const fallback = listed.length > 0 ? listed : strings(payload.aud).length > 0 ? strings(payload.aud) : strings(payload.serviceSlug ?? payload.service);
+  const fallback = listed.length > 0 ? listed : strings(payload.aud);
   return Array.from(new Set(fallback.map((s) => s.toLowerCase())));
 }
 
 /** Clock skew tolerated on JWT `exp` / `nbf`: 30 seconds, and never more (see `clockSkewSeconds`). */
 export const JWT_CLOCK_SKEW_SECONDS = 30;
+/** Longest accepted JWT (characters); longer input is refused before any parsing. */
+export const MAX_JWT_LENGTH = 16_384;
 
 /**
- * Zero-egress offline verification for asymmetric JWT token leases.
- * Requires a numeric `exp` and an audience (`aud` or `serviceSlug`) equal to `expectedServiceSlug`;
- * a verifier without an expected slug rejects every lease. `iss` is checked when `expectedIssuer` is set
- * (Daywalker documents no fixed issuer, so there is no default). Segments must be canonical unpadded
- * base64url, a `crit` header is rejected, and a JWKS `publicKey` is searched by the header's `kid`.
+ * Zero-egress offline verification of Daywalker access tokens (RFC 9068 JWTs from the OAuth token endpoint).
+ * Requires `typ: at+jwt`, `alg: EdDSA`, a `jti`, a numeric `exp`, and an `aud` containing `expectedServiceSlug`
+ * (a verifier without an expected slug rejects every token). `iss` is checked when `expectedIssuer` is set.
+ * Segments must be canonical unpadded base64url, a `crit` header is rejected, and a JWKS `publicKey` is
+ * searched by the header's `kid`. A token with `cnf.jkt` is DPoP-bound: the caller must also check its
+ * proof (`verifyDpopProof`), as `Daywalker.validateToken()` does.
  */
 export async function verifyJwtLease(params: {
   token: string;
@@ -504,6 +506,9 @@ export async function verifyJwtLease(params: {
   clockSkewSeconds?: number;
 }): Promise<{ valid: boolean; payload?: Record<string, unknown>; error?: string }> {
   try {
+    if (typeof params.token !== "string" || params.token.length > MAX_JWT_LENGTH) {
+      return { valid: false, error: "Token is not a string or is too long" };
+    }
     const parts = params.token.trim().split(".");
     if (parts.length !== 3) {
       return { valid: false, error: "Token is not a valid 3-part JWT" };
@@ -527,11 +532,11 @@ export async function verifyJwtLease(params: {
       return { valid: false, error: "JWT header and payload must be JSON objects" };
     }
 
-    if (header.alg !== "EdDSA" && header.alg !== "ed25519") {
+    if (header.alg !== "EdDSA") {
       return { valid: false, error: `Unsupported JWT alg: ${header.alg}` };
     }
-    // "JWT" (older leases) or "at+jwt" (RFC 9068 access tokens); a refresh token ("rt+jwt") is never accepted here
-    if (header.typ !== undefined && !["JWT", "AT+JWT"].includes(String(header.typ).toUpperCase())) {
+    // RFC 9068 §4: only access tokens; a refresh token, ID token or any other JWT under the same key is refused
+    if (typeof header.typ !== "string" || header.typ.toLowerCase() !== "at+jwt") {
       return { valid: false, error: `Unsupported JWT typ: ${header.typ}` };
     }
     // RFC 7515 §4.1.11: extensions we don't understand must be rejected; we implement none.
@@ -545,7 +550,7 @@ export async function verifyJwtLease(params: {
     const { publicKey } = await loadPublicKey(params.publicKey, header.kid);
     const signedData = stringToUtf8(`${headerB64}.${payloadB64}`);
 
-    const isValid = await globalThis.crypto.subtle.verify(
+    const isValid = await webcrypto.verify(
       "Ed25519",
       publicKey,
       signatureBytes as unknown as BufferSource,
@@ -575,22 +580,20 @@ export async function verifyJwtLease(params: {
     if (!expected) {
       return { valid: false, error: "JWT audience cannot be checked: no expected service slug is configured" };
     }
-    const audiences: string[] = [];
-    if (payload.serviceSlug !== undefined) audiences.push(String(payload.serviceSlug));
-    if (Array.isArray(payload.aud)) audiences.push(...payload.aud.map(String));
-    else if (payload.aud !== undefined) audiences.push(String(payload.aud));
+    const audiences: string[] = (Array.isArray(payload.aud) ? payload.aud : payload.aud === undefined ? [] : [payload.aud]).filter(
+      (a: unknown): a is string => typeof a === "string"
+    );
     if (audiences.length === 0) {
-      return { valid: false, error: "JWT token lease has no aud or serviceSlug claim" };
+      return { valid: false, error: "JWT has no aud claim" };
     }
-    const serviceSlugOk = payload.serviceSlug === undefined || String(payload.serviceSlug).toLowerCase() === expected;
-    const audOk =
-      payload.aud === undefined ||
-      (Array.isArray(payload.aud) ? payload.aud : [payload.aud]).some((a: unknown) => String(a).toLowerCase() === expected);
-    if (!serviceSlugOk || !audOk) {
+    if (!audiences.some((a: string) => a.toLowerCase() === expected)) {
       return {
         valid: false,
         error: `JWT audience mismatch: expected ${expected}, got ${audiences.join(", ").toLowerCase()}`,
       };
+    }
+    if (payload.cnf !== undefined && (!payload.cnf || typeof payload.cnf !== "object" || typeof payload.cnf.jkt !== "string")) {
+      return { valid: false, error: "JWT cnf claim must carry a jkt thumbprint" };
     }
 
     // A lease that lists its services must list this one (belt and braces next to `aud`).
@@ -614,8 +617,13 @@ export async function verifyJwtLease(params: {
   }
 }
 
+/** Per-attempt timeout for key registration. */
+const REGISTER_TIMEOUT_MS = 10_000;
+
 /**
  * Register public key directly with Daywalker Auth via POST /api/v1/keys/register (Push Architecture).
+ * The API key is sent as `Authorization: Bearer` to `authUrl` only: redirects are refused (never followed
+ * with the key), the request times out after 10s, and nothing is cached. Inputs are validated first.
  */
 export async function registerPublicKey(params: {
   authUrl?: string;
@@ -637,6 +645,26 @@ export async function registerPublicKey(params: {
   if (!params.domain) {
     return { ok: false, status: 400, error: "domain is required to register a key (set --domain or DAYWALKER_DOMAIN)" };
   }
+  const domain = publicHostname(params.domain);
+  if (!domain) {
+    return { ok: false, status: 400, error: `domain (${params.domain}) is not a public hostname` };
+  }
+  if (typeof params.apiKey !== "string" || !API_KEY_PATTERN.test(params.apiKey)) {
+    return { ok: false, status: 400, error: "apiKey is missing or contains characters an API key can't have" };
+  }
+  const slugs = params.serviceSlug ? parseServiceSlugs(params.serviceSlug) : [];
+  if (!slugs.every((slug) => SERVICE_SLUG_PATTERN.test(slug))) {
+    return { ok: false, status: 400, error: "serviceSlug must be Daywalker service slug(s)" };
+  }
+  const jwk = params.publicJwk;
+  if (!jwk || jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(jwk.x) || "d" in jwk) {
+    return { ok: false, status: 400, error: "publicJwk must be an Ed25519 public JWK (never a private key)" };
+  }
+  try {
+    assertSafeIdentifier("keyId", jwk.kid);
+  } catch (err) {
+    return { ok: false, status: 400, error: (err as Error).message };
+  }
 
   try {
     const res = await doFetch(registerUrl, {
@@ -647,29 +675,28 @@ export async function registerPublicKey(params: {
         Authorization: `Bearer ${params.apiKey}`,
       },
       body: JSON.stringify({
-        keyId: params.publicJwk.kid,
-        domain: params.domain,
-        publicKey: params.publicJwk,
+        keyId: jwk.kid,
+        domain,
+        publicKey: { kty: "OKP", crv: "Ed25519", x: jwk.x, kid: jwk.kid, use: "sig", alg: "EdDSA" },
         // Lets Daywalker refuse right away when the API key doesn't cover the service(s); a comma-separated list is fine
-        ...(params.serviceSlug ? { serviceSlug: params.serviceSlug } : {}),
+        ...(slugs.length > 0 ? { serviceSlug: slugs.join(",") } : {}),
       }),
+      redirect: "manual",
+      cache: "no-store",
+      signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
     });
 
+    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
+      return { ok: false, status: res.status, error: "Daywalker Auth answered with a redirect; refusing to follow it with the API key" };
+    }
     if (res.ok) {
       return { ok: true, status: res.status };
     }
 
-    const data = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
-    return {
-      ok: false,
-      status: res.status,
-      error: data.message || data.error || `HTTP ${res.status}`,
-    };
+    const data = (await res.json().catch(() => ({}))) as { message?: unknown; error?: unknown };
+    const message = typeof data.message === "string" ? data.message : typeof data.error === "string" ? data.error : `HTTP ${res.status}`;
+    return { ok: false, status: res.status, error: redactSecrets(message.slice(0, 500)) };
   } catch (err) {
-    return {
-      ok: false,
-      status: 0,
-      error: (err as Error).message,
-    };
+    return { ok: false, status: 0, error: redactSecrets((err as Error).message) };
   }
 }

@@ -20,7 +20,8 @@ Runs on **Node.js 20.19+**, **Bun**, **Deno**, **Cloudflare Workers**, **Next.js
 - **Resilience & Rate Limiting**: 5s per-attempt timeout, exponential backoff with jitter, `Retry-After` honored up to 60s. Network errors are retried only for idempotent requests (or with an `idempotencyKey`), and redirects are never followed, so credentials and access tokens can't leak to another host.
 - **Deterministic Type-Safe Results**: Discriminated union returns (`Result<T, E>`) for clean handling without try/catch boilerplate.
 - **Security-Hardened Next.js Middleware**: Built-in Server Action probe mitigation (CVE-2025-55182 defense), normalized paths (no `%2e%2e` / `//` bypasses), open-redirect-safe error routing, and fail-closed validation (503 when Daywalker is unreachable).
-- **Zero-Egress Inbound Verification**: In-memory caching (60–300s TTL) and offline JWT token lease validation using Daywalker's asymmetric public key.
+- **Zero-Egress Inbound Verification**: In-memory caching (60s by default, never more than 300s) and offline verification of Daywalker access tokens, including the DPoP proof of sender-constrained tokens.
+- **Tamper-Resistant by Design**: client state lives in true private fields, config and prototypes are frozen, WebCrypto is captured at load, and every input is bounded and validated. See [Security model](#security-model).
 - **Decoupled Push Architecture CLI**: `npx daywalker init --json` registers keys directly via `POST /api/v1/keys/register` with zero runtime reverse-HTTP calls.
 
 ---
@@ -71,6 +72,7 @@ The private key is never printed unless you pass `--print-key`.
 | `DAYWALKER_PUBLIC_KEY` | optional | Daywalker Auth public key for zero-egress offline JWT lease verification |
 | `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev`; must be `https://` (except localhost) |
 | `DAYWALKER_LEASE_ISSUER` | optional | Expected `iss` of offline-verified JWTs (default `https://auth.daywalker.dev`) |
+| `DAYWALKER_PUBLIC_ORIGIN` | behind a proxy | The origin clients use to reach this service (e.g. `https://api.example.com`), for checking DPoP proofs. Defaults to the request URL's origin |
 
 ---
 
@@ -122,7 +124,7 @@ await client.accessToken();                  // the current access token, refres
 await client.validateServiceCredentials();   // health check: can this service still get a token for its service?
 ```
 
-If the grant itself fails (revoked API key, unregistered signing key, allowlist mismatch), `validateToken()` returns `503 SERVICE_UNAVAILABLE` with the token endpoint's code in the message, never a `401` for the caller's token; a missing `DAYWALKER_API_KEY` is `500 CONFIGURATION_ERROR`. `validateServiceKey()` is a deprecated alias of `validateServiceCredentials()`.
+If the grant itself fails (revoked API key, unregistered signing key, allowlist mismatch), `validateToken()` returns `503 SERVICE_UNAVAILABLE` with the token endpoint's code in the message, never a `401` for the caller's token; a missing `DAYWALKER_API_KEY` is `500 CONFIGURATION_ERROR`.
 
 ### Type-Safe Verification & Error Handling
 
@@ -172,7 +174,7 @@ export const config = {
 };
 ```
 
-Each request must carry `Authorization: Bearer <token>` or `x-api-token`; without one, API routes get `401` and pages redirect to `errorPath` (without an error message in the URL). Paths are decoded and normalized before any check, so `/_next/static/../admin` is authenticated. Only `/_next/static/`, `/_next/image`, `/favicon.ico`, `/robots.txt`, `/sitemap.xml` and the health paths skip auth by default. File extensions say nothing about whether a route is public, so they no longer skip auth; opt in with `staticFileExtensions: STATIC_FILE_EXTENSIONS` if you rely on that. When Daywalker is unreachable the middleware answers `503`, and `500` for a configuration error. To gate the app on this service's own OAuth client credentials instead (the self-healing error page), use `createDaywalkerServiceHealthMiddleware` with the same options.
+Each request must carry `Authorization: Bearer <token>`, `Authorization: DPoP <token>` with its `DPoP` proof header, or `x-api-token`. An `Authorization` header with any other scheme, or a credentials header sent twice, is refused rather than skipped. Without credentials, API routes get `401` and pages redirect to `errorPath` (without an error message in the URL). Paths are decoded and normalized before any check, so `/_next/static/../admin` is authenticated. Only `/_next/static/`, `/_next/image`, `/favicon.ico`, `/robots.txt`, `/sitemap.xml` and the health paths skip auth by default. File extensions say nothing about whether a route is public, so they no longer skip auth; opt in with `staticFileExtensions: STATIC_FILE_EXTENSIONS` if you rely on that. When Daywalker is unreachable the middleware answers `503`, and `500` for a configuration error. To gate the app on this service's own OAuth client credentials instead (the self-healing error page), use `createDaywalkerServiceHealthMiddleware` with the same options.
 
 ### Route Handler Wrapper
 
@@ -208,16 +210,15 @@ app.get("/api/me", (c) => {
 
 ```ts
 import express from "express";
-import { daywalkerAuth, daywalkerKeys } from "@shelbyb/daywalker-sdk/express";
+import { daywalkerAuth } from "@shelbyb/daywalker-sdk/express";
 
 const app = express();
-app.use(daywalkerKeys()); // serves GET /.well-known/daywalker-keys.json
 app.use("/api", daywalkerAuth({ serviceSlug: "sonalyze" }));
 
 app.get("/api/me", (req, res) => res.json({ auth: req.auth }));
 ```
 
-`daywalkerAuth` reads `Authorization: Bearer <token>` or `x-api-token`, answers `401` when neither is present, and otherwise returns the same status codes as the other middleware (`429` with `Retry-After`, `503` when Daywalker is unreachable). On success the validated payload is on `req.auth`. Both functions also work with plain `http.createServer` handlers.
+`daywalkerAuth` reads credentials the same way as the Next middleware, answers `401` when there are none (or they are malformed), and otherwise returns the same status codes as the other middleware (`429` with `Retry-After`, `503` when Daywalker is unreachable). On success the validated payload is on `req.auth`. It also works with plain `http.createServer` handlers.
 
 ---
 
@@ -301,7 +302,7 @@ const client = new Daywalker({
 const result = await client.validateToken(incomingJwt);
 ```
 
-Tokens must have a numeric `exp`, a `jti`, and an `aud` (or `serviceSlug`) containing your service slug, so `serviceSlug` must be configured. A lease that lists `services` must list yours too. `result.data.services` is every service the lease covers (see [One API key, several services](#one-api-key-several-services)). Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
+Tokens must be RFC 9068 access tokens (`typ: at+jwt`, `alg: EdDSA`) with a numeric `exp`, a `jti`, and an `aud` containing your service slug, so `serviceSlug` must be configured. A token that lists `services` must list yours too. A DPoP-bound token (`cnf.jkt`) is only accepted with `Authorization: DPoP` and a valid proof: right method and URL, signed by the bound key, fresh, carrying the token's hash, and never used before. A copied token alone is useless. With several instances, pass a shared `dpopReplayStore` (like `replayStore` for signatures). `result.data.services` is every service the lease covers (see [One API key, several services](#one-api-key-several-services)). Set `leaseIssuer` (or `DAYWALKER_LEASE_ISSUER`) to also check `iss`.
 
 ---
 
@@ -310,7 +311,7 @@ Tokens must have a numeric `exp`, a `jti`, and an `aud` (or `serviceSlug`) conta
 | Command | Description |
 |---|---|
 | `npx daywalker init --service <slug[,slug…]> [--domain <host>] [--api-key-stdin] [--skip-register] [--force] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
-| `npx daywalker check` | Validate configuration, signature readiness, and connection |
+| `npx daywalker check [--offline]` | Validate configuration and signature readiness, then run the OAuth client credentials grant to confirm the credentials work and cover the configured service(s) (`--offline` skips that) |
 | `npx daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--skip-register] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
 
 ---
@@ -324,7 +325,7 @@ Tokens must have a numeric `exp`, a `jti`, and an `aud` (or `serviceSlug`) conta
 | `POST /api/v1/oauth/token` | `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()`, `client.accessToken()` (called for you by `validateToken()` / `fetch()`) | `client_credentials` (API key as Bearer + signed request, mandatory DPoP) and `refresh_token` grants return `{ accessToken, refreshToken, expiresAt, services, … }`; tokens are sender-constrained via DPoP (RFC 9449), refresh tokens rotate, and reuse revokes the session |
 | `GET /.well-known/jwks.json` | `client.fetchJwks()` | Daywalker public JWKS for offline lease verification |
 
-Inbound tokens may be supplied as `x-api-token: srv_live_...` or `Authorization: Bearer <JWT or API key>`.
+Inbound tokens may be supplied as `x-api-token: srv_live_...`, `Authorization: Bearer <token>`, or `Authorization: DPoP <access token>` with a `DPoP` proof. An online answer must name your service: a token validated for a sibling service your credentials also cover is refused with `403 SERVICE_NOT_GRANTED`.
 
 ---
 
@@ -341,6 +342,22 @@ A fresh random `nonce` is generated for every attempt (including retries), so id
 Verification reads the covered components from `Signature-Input`, requires `content-digest` to be covered whenever there is a body, and rejects replays. The default replay cache is per process: with several instances, pass a shared `replayStore` (e.g. Redis `SET NX PX`). The exact signature base and test cases are verified against [`test-vectors/signing-rfc9421.json`](./test-vectors/signing-rfc9421.json).
 
 ---
+
+## Security Model
+
+This SDK checks that callers hold a valid Daywalker credential, and that the service it runs in holds valid OAuth client credentials. It is built to resist tampering by **other code in the same process** (a compromised dependency, an injected script, a confused AI agent editing at runtime):
+
+- **No reachable internals.** Caches, tokens, the DPoP key and the config are ES `#private` fields, so `client._cache` doesn't exist to be poisoned. `Daywalker.prototype`, the class and each instance are frozen, so `validateToken` can't be swapped by assignment, including on the shared `daywalker` client.
+- **Frozen, secret-free config.** `client.config` is frozen and shows the API key and private keys only as `"[configured]"`. The options object is read once, so changing it later (say, `authUrl` or `fetch`) has no effect.
+- **Captured primitives.** WebCrypto (`subtle.verify`, `sign`, `digest`, …) is captured when the SDK loads, so replacing `crypto.subtle.verify` later can't make forged tokens verify. The Next adapter builds its own responses and ignores any `NextResponse` planted on `globalThis`.
+- **Sender-constrained tokens.** The SDK's own access tokens are DPoP-bound to a non-extractable key generated in memory, and only the token endpoint ever sees the API key. Incoming DPoP-bound tokens need a valid proof.
+- **Bounded, validated input.** Tokens (≤ 8 KiB, token characters only), headers, DPoP proofs, JWTs and response bodies (≤ 1 MiB) are size-checked and validated before use. Nothing is followed through a redirect, cached by an HTTP cache (`cache: "no-store"`), or trusted from an answer of the wrong shape (fail closed).
+
+**What no client-side SDK can do:** stop the operator of the server it runs on. Whoever controls a deployment can edit `node_modules`, patch the code, or delete the middleware, and obfuscation only slows that down. So treat this package as the *enforcement point*, and put the *decision* on Daywalker's side, where it can't be removed:
+
+1. Make the service depend on what only a valid grant provides. Read limits and features from the verified access token (`service_limits`, `service_features`) rather than from local config, so code with the SDK ripped out has nothing to run on.
+2. Revoke on Daywalker. Revoking the API key, signing key or allowlist entry ends the client credentials session (and every refresh) at the next token request, within 15 minutes at most.
+3. Keep the signing key and API key in a secret manager, run `npx daywalker check` in CI and at startup, and watch Daywalker's usage analytics for clients that stop calling in.
 
 ## DevPulse SDKs (one package)
 

@@ -52,5 +52,5 @@ export type {
   ReplayStore,
 } from "./signatures.js";
 
-export { generateDpopKey, createDpopProof } from "./dpop.js";
-export type { DpopKey } from "./dpop.js";
+export { generateDpopKey, createDpopProof, verifyDpopProof, globalDpopReplayCache, MAX_DPOP_PROOF_LENGTH, DPOP_MAX_AGE_SECONDS } from "./dpop.js";
+export type { DpopKey, VerifyDpopProofParams } from "./dpop.js";

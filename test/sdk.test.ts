@@ -66,7 +66,6 @@ describe("RFC 9421 / RFC 9530 WebCrypto signing protocol", () => {
         body: v.body,
         key,
         created: v.timestamp,
-        apiKey: "srv_live_test_token",
       });
 
       assert.strictEqual(headers["Content-Digest"], v.contentDigest);
@@ -74,7 +73,8 @@ describe("RFC 9421 / RFC 9530 WebCrypto signing protocol", () => {
       assert.match(headers["Signature"], new RegExp(`^${SIGNATURE_LABEL}=:[A-Za-z0-9+/=_-]+:$`));
       // Ed25519 is deterministic, so the server must reproduce exactly this signature.
       assert.strictEqual(headers["Signature"], v.signature);
-      assert.strictEqual(headers["Authorization"], "Bearer srv_live_test_token");
+      // Signing never adds credentials: the API key is only sent on the OAuth client credentials grant.
+      assert.strictEqual(headers["Authorization"], undefined);
 
       // Verify signature with public JWK
       const verifyRes = await verifyRequestSignature({
@@ -193,7 +193,7 @@ describe("Zero-egress offline JWT lease verification", () => {
   const pubJwk = crypto.createPublicKey(privateKey).export({ format: "jwk" }) as any;
 
   function createTestJwt(payload: Record<string, unknown>) {
-    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+    const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "at+jwt" })).toString("base64url");
     const body = Buffer.from(JSON.stringify({ jti: "j1", iss: "https://auth.daywalker.dev", ...payload })).toString("base64url");
     const sig = crypto.sign(null, Buffer.from(`${header}.${body}`, "utf8"), privateKey).toString("base64url");
     return `${header}.${body}.${sig}`;
@@ -203,7 +203,7 @@ describe("Zero-egress offline JWT lease verification", () => {
     const now = Math.floor(Date.now() / 1000);
     const jwt = createTestJwt({
       sub: "tok_12345",
-      serviceSlug: "myservice",
+      aud: "myservice",
       userId: "usr_abc",
       exp: now + 3600,
       nbf: now - 10,
@@ -226,7 +226,7 @@ describe("Zero-egress offline JWT lease verification", () => {
     const now = Math.floor(Date.now() / 1000);
     const expiredJwt = createTestJwt({
       sub: "tok_12345",
-      serviceSlug: "myservice",
+      aud: "myservice",
       exp: now - 120, // beyond the 30s clock skew allowance
     });
 
@@ -236,7 +236,7 @@ describe("Zero-egress offline JWT lease verification", () => {
 
     const validJwt = createTestJwt({
       sub: "tok_12345",
-      serviceSlug: "other-service",
+      aud: "other-service",
       exp: now + 3600,
     });
     const res2 = await verifyJwtLease({
@@ -256,7 +256,11 @@ describe("Daywalker Client class & lazy proxy", () => {
       apiKey: "srv_live_inst",
       serviceSlug: "myservice",
     });
-    assert.strictEqual(client.config.apiKey, "srv_live_inst");
+    // The public config never exposes the secret, and can't be changed.
+    assert.strictEqual(client.config.apiKey, "[configured]");
+    assert.throws(() => {
+      (client.config as any).authUrl = "https://evil.example";
+    }, TypeError);
     assert.strictEqual(client.config.serviceSlug, "myservice");
 
     // Lazy default instance proxy
@@ -433,7 +437,7 @@ describe("Framework Middleware Adapters", () => {
 
     // 3. Handles invalid token on API routes (returns JSON 401 with CORS)
     const invalidClient = new Daywalker({
-      apiKey: "srv_bad",
+      apiKey: "srv_live_bad",
       serviceSlug: "sonalyze",
       fetch: withOAuth(async () => new Response(JSON.stringify({ error: "REVOKED", message: "Token revoked" }), { status: 401 })),
     });
@@ -550,7 +554,7 @@ describe("Nonce, in-flight dedupe and negative cache", () => {
       fetch: withOAuth(async () => {
         calls++;
         await new Promise((r) => setTimeout(r, 20));
-        return Response.json({ valid: true, tenantId: "t1" });
+        return Response.json({ valid: true, serviceSlug: "sonalyze", tenantId: "t1" });
       }),
     });
     const results = await Promise.all([client.validateToken("tok"), client.validateToken("tok"), client.validateToken("tok")]);
