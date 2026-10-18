@@ -17,6 +17,7 @@ import {
   resolveConfig,
   verifyJwtLease,
 } from "../src/index.js";
+import { withOAuth } from "./helpers/oauth.js";
 
 const { privateKey } = crypto.generateKeyPairSync("ed25519");
 const pubJwk = crypto.createPublicKey(privateKey).export({ format: "jwk" }) as any;
@@ -135,8 +136,8 @@ describe("online validation of a multi-service token", () => {
       new Daywalker({
         apiKey: "k",
         serviceSlug: "devpulse",
-        fetch: async () =>
-          Response.json({ valid: true, serviceSlug: "devpulse", tenantId: "t", rateLimit: { limit: 1, remaining: 1, reset: 1 }, ...extra }),
+        fetch: withOAuth(async () =>
+          Response.json({ valid: true, serviceSlug: "devpulse", tenantId: "t", rateLimit: { limit: 1, remaining: 1, reset: 1 }, ...extra })),
       }).validateToken("srv_live_x");
 
     const multi = await answer({ services: ["gigpulse", "devpulse"] });

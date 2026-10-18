@@ -23,6 +23,7 @@ import { init } from "../src/flags/node.js";
 import { applyOperator, getAttribute, parseContext } from "../src/flags/engine/index.js";
 import { hasNestedQuantifier } from "../src/flags/engine/operators.js";
 import { EventProcessor } from "../src/flags/common/index.js";
+import { withOAuth, type TokenRequestLog } from "./helpers/oauth.js";
 
 async function signed(created = Math.floor(Date.now() / 1000), pathName = `/api/v1/replay/${crypto.randomUUID()}`) {
   const key = await generateSigningKey();
@@ -114,7 +115,7 @@ describe("JWT lease claims", () => {
   });
 
   it("never caches a lease past its exp", async () => {
-    const client = new Daywalker({ serviceSlug: "myservice", daywalkerPublicKey: pubJwk, cacheTtlMs: 600_000, fetch: async () => Response.json({}) });
+    const client = new Daywalker({ serviceSlug: "myservice", daywalkerPublicKey: pubJwk, cacheTtlMs: 600_000, fetch: withOAuth(async () => Response.json({})) });
     const exp = Math.floor(Date.now() / 1000) + 5;
     const result = await client.validateToken(jwt({ aud: "myservice", exp }));
     assert.strictEqual(result.ok, true);
@@ -126,17 +127,19 @@ describe("JWT lease claims", () => {
 describe("Per-request auth never falls back to the service key", () => {
   it("rejects requests without a token with 401 and never calls Daywalker", async () => {
     let calls = 0;
-    const client = new Daywalker({ apiKey: "srv_live_service_key", serviceSlug: "svc", fetch: async () => (calls++, Response.json({ valid: true, tenantId: "t" })) });
+    const tokenRequests: TokenRequestLog[] = [];
+    const client = new Daywalker({ apiKey: "srv_live_service_key", serviceSlug: "svc", fetch: withOAuth(async () => (calls++, Response.json({ valid: true, tenantId: "t" })), { log: tokenRequests }) });
     const mw = createDaywalkerMiddleware({ client });
     const res = await mw(new Request("https://app.example.com/api/data"));
     assert.strictEqual(res.status, 401);
     assert.strictEqual((await client.validateToken({ serviceSlug: "svc" })).status, 401);
     assert.strictEqual(calls, 0);
 
-    // The service-health gate is separate and explicitly named.
+    // The service-health gate is separate and explicitly named: it checks the OAuth client credentials grant.
     const health = createDaywalkerServiceHealthMiddleware({ client });
     assert.strictEqual((await health(new Request("https://app.example.com/dashboard"))).headers.get("x-middleware-next"), "1");
-    assert.strictEqual(calls, 1);
+    assert.strictEqual(calls, 0);
+    assert.deepStrictEqual(tokenRequests.map((r) => [r.grantType, r.authorization]), [["client_credentials", "Bearer srv_live_service_key"]]);
   });
 });
 
@@ -152,7 +155,7 @@ describe("Next middleware static bypass", () => {
     for (const p of ["/_next/data/build/page.json", "/api/report.js", "/api/x.png", "/dashboard", "/export.pdf", "/_next/webpack-hmr"]) {
       assert.strictEqual(isStaticAssetPath(p, STATIC_FILE_EXTENSIONS), false, p);
     }
-    const client = new Daywalker({ serviceSlug: "svc", fetch: async () => Response.json({ valid: true }) });
+    const client = new Daywalker({ serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true })) });
     const mw = createDaywalkerMiddleware({ client, protectApiOnly: true });
     assert.strictEqual((await mw(new Request("https://app.example.com/api/report.js"))).status, 401);
   });
@@ -160,7 +163,7 @@ describe("Next middleware static bypass", () => {
 
 describe("Validation cache", () => {
   it("is bounded and keyed by a token hash, not the raw token", async () => {
-    const client = new Daywalker({ serviceSlug: "svc", fetch: async () => Response.json({ valid: true, tenantId: "t" }) });
+    const client = new Daywalker({ apiKey: "srv_live_k", serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true, tenantId: "t" })) });
     for (let i = 0; i < MAX_VALIDATION_CACHE_ENTRIES + 50; i++) await client.validateToken(`tok_raw_secret_${i}`);
     const keys = [...(client as any)._cache.keys()] as string[];
     assert.strictEqual(keys.length, MAX_VALIDATION_CACHE_ENTRIES);
@@ -191,7 +194,7 @@ describe("Transport security", () => {
 
   it("refuses to send the API key to another origin from fetch()", async () => {
     let calls = 0;
-    const client = new Daywalker({ apiKey: "srv_live_secret", fetch: async () => (calls++, Response.json({})) });
+    const client = new Daywalker({ apiKey: "srv_live_secret", fetch: withOAuth(async () => (calls++, Response.json({}))) });
     await assert.rejects(client.fetch("https://evil.example.com/steal"), /Refusing/);
     await assert.rejects(client.fetch("//evil.example.com/steal"), /Refusing/);
     assert.strictEqual(calls, 0);

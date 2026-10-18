@@ -28,6 +28,7 @@ import {
 } from "../src/index.js";
 import { withDaywalkerAuth, createDaywalkerMiddleware } from "../src/next.js";
 import { daywalkerAuth, daywalkerMiddleware } from "../src/middleware.js";
+import { withOAuth, type TokenRequestLog } from "./helpers/oauth.js";
 
 const vectors = JSON.parse(
   fs.readFileSync(new URL("../test-vectors/signing-rfc9421.json", import.meta.url), "utf8")
@@ -268,23 +269,41 @@ describe("Daywalker Client class & lazy proxy", () => {
   it("performs signed fetch and discriminated union validation", async () => {
     const key = await generateSigningKey();
     let capturedHeaders: Headers | null = null;
+    const tokenRequests: TokenRequestLog[] = [];
 
     const client = new Daywalker({
       apiKey: "srv_live_test",
       serviceSlug: "sonalyze",
       signingKey: key.privateKeyPkcs8Base64,
-      fetch: async (url, init) => {
-        capturedHeaders = new Headers(init?.headers);
-        return Response.json({
-          valid: true,
-          serviceSlug: "sonalyze",
-          tenantId: "ten_123",
-          rateLimit: { limit: 100, remaining: 99, reset: 123456 },
-        });
-      },
+      fetch: withOAuth(
+        async (url, init) => {
+          capturedHeaders = new Headers(init?.headers);
+          return Response.json({
+            valid: true,
+            serviceSlug: "sonalyze",
+            tenantId: "ten_123",
+            rateLimit: { limit: 100, remaining: 99, reset: 123456 },
+          });
+        },
+        { services: ["sonalyze", "devpulse"], log: tokenRequests }
+      ),
     });
 
-    const result = await client.validateServiceKey();
+    // The service health check runs the OAuth client credentials grant; it never sends the API key for validation.
+    const health = await client.validateServiceCredentials();
+    assert.strictEqual(health.ok, true);
+    if (health.ok) {
+      assert.strictEqual(health.data.serviceSlug, "sonalyze");
+      assert.deepStrictEqual(health.data.services, ["sonalyze", "devpulse"]);
+      assert.strictEqual(health.data.userId, "0190c0de-0000-7000-8000-000000000001");
+    }
+    assert.strictEqual(capturedHeaders, null);
+    assert.strictEqual(tokenRequests.length, 1);
+    assert.strictEqual(tokenRequests[0].grantType, "client_credentials");
+    assert.strictEqual(tokenRequests[0].authorization, "Bearer srv_live_test");
+    assert.ok(tokenRequests[0].dpop);
+
+    const result = await client.validateToken("tok_caller");
     assert.strictEqual(result.ok, true);
     if (result.ok) {
       assert.strictEqual(result.data.serviceSlug, "sonalyze");
@@ -294,10 +313,16 @@ describe("Daywalker Client class & lazy proxy", () => {
 
     assert.ok(capturedHeaders!.has("signature-input"));
     assert.ok(capturedHeaders!.has("signature"));
-    assert.strictEqual(capturedHeaders!.get("authorization"), "Bearer srv_live_test");
+    assert.match(capturedHeaders!.get("authorization")!, /^DPoP ey/);
+    assert.ok(capturedHeaders!.has("dpop"));
+    assert.strictEqual(tokenRequests.length, 1, "the access token is reused while it is valid");
 
-    const payload = await client.requireValidToken("tok_caller");
+    const payload = await client.requireValidToken("tok_other");
     assert.strictEqual(payload.tenantId, "ten_123");
+
+    const notGranted = await client.validateServiceCredentials({ serviceSlug: "gigpulse" });
+    assert.strictEqual(notGranted.ok, false);
+    if (!notGranted.ok) assert.strictEqual(notGranted.error, "SERVICE_NOT_GRANTED");
   });
 
   it("handles automatic retries on 429 rate limits", async () => {
@@ -307,7 +332,7 @@ describe("Daywalker Client class & lazy proxy", () => {
       serviceSlug: "sonalyze",
       maxRetries: 3,
       retry: { initialDelayMs: 10, maxDelayMs: 50 },
-      fetch: async () => {
+      fetch: withOAuth(async () => {
         attempts++;
         if (attempts < 3) {
           return new Response(JSON.stringify({ error: "RATE_LIMITED", message: "chill" }), {
@@ -316,7 +341,7 @@ describe("Daywalker Client class & lazy proxy", () => {
           });
         }
         return Response.json({ ok: true });
-      },
+      }),
     });
 
     const res = await client.fetch("/api/v1/test");
@@ -328,15 +353,15 @@ describe("Daywalker Client class & lazy proxy", () => {
     const client = new Daywalker({
       apiKey: "srv_invalid",
       serviceSlug: "sonalyze",
-      fetch: async () => {
+      fetch: withOAuth(async () => {
         return new Response(JSON.stringify({ error: "EXPIRED", message: "Token expired" }), {
           status: 401,
           headers: { "Content-Type": "application/json" },
         });
-      },
+      }),
     });
 
-    const result = await client.validateServiceKey();
+    const result = await client.validateToken("tok_expired");
     assert.strictEqual(result.ok, false);
     if (!result.ok) {
       assert.strictEqual(result.error, "EXPIRED");
@@ -356,8 +381,9 @@ describe("Daywalker Client class & lazy proxy", () => {
 describe("Framework Middleware Adapters", () => {
   it("withDaywalkerAuth wraps Next.js App Router handlers", async () => {
     const client = new Daywalker({
+      apiKey: "srv_live_svc",
       serviceSlug: "myservice",
-      fetch: async () => Response.json({ valid: true, tenantId: "ten_next", serviceSlug: "myservice" }),
+      fetch: withOAuth(async () => Response.json({ valid: true, tenantId: "ten_next", serviceSlug: "myservice" })),
     });
 
     const handler = withDaywalkerAuth(async (req, { auth }) => {
@@ -383,7 +409,7 @@ describe("Framework Middleware Adapters", () => {
     const client = new Daywalker({
       apiKey: "srv_live_key",
       serviceSlug: "sonalyze",
-      fetch: async () => Response.json({ valid: true, tenantId: "ten_live", serviceSlug: "sonalyze" }),
+      fetch: withOAuth(async () => Response.json({ valid: true, tenantId: "ten_live", serviceSlug: "sonalyze" })),
     });
 
     const mw = createDaywalkerMiddleware({ client });
@@ -409,7 +435,7 @@ describe("Framework Middleware Adapters", () => {
     const invalidClient = new Daywalker({
       apiKey: "srv_bad",
       serviceSlug: "sonalyze",
-      fetch: async () => new Response(JSON.stringify({ error: "REVOKED", message: "Token revoked" }), { status: 401 }),
+      fetch: withOAuth(async () => new Response(JSON.stringify({ error: "REVOKED", message: "Token revoked" }), { status: 401 })),
     });
     const invalidMw = createDaywalkerMiddleware({ client: invalidClient });
 
@@ -435,8 +461,9 @@ describe("Framework Middleware Adapters", () => {
 
   it("daywalkerAuth works as Web / Hono middleware", async () => {
     const client = new Daywalker({
+      apiKey: "srv_live_svc",
       serviceSlug: "myservice",
-      fetch: async () => Response.json({ valid: true, tenantId: "ten_hono", serviceSlug: "myservice" }),
+      fetch: withOAuth(async () => Response.json({ valid: true, tenantId: "ten_hono", serviceSlug: "myservice" })),
     });
 
     const mw = daywalkerAuth({ client });
@@ -520,11 +547,11 @@ describe("Nonce, in-flight dedupe and negative cache", () => {
       apiKey: "srv_live_x",
       serviceSlug: "sonalyze",
       signingKey: key.privateKeyPkcs8Base64,
-      fetch: async () => {
+      fetch: withOAuth(async () => {
         calls++;
         await new Promise((r) => setTimeout(r, 20));
         return Response.json({ valid: true, tenantId: "t1" });
-      },
+      }),
     });
     const results = await Promise.all([client.validateToken("tok"), client.validateToken("tok"), client.validateToken("tok")]);
     assert.strictEqual(calls, 1);
@@ -539,12 +566,12 @@ describe("Nonce, in-flight dedupe and negative cache", () => {
       apiKey: "srv_live_x",
       serviceSlug: "sonalyze",
       signingKey: key.privateKeyPkcs8Base64,
-      fetch: async (_u, init) => {
+      fetch: withOAuth(async (_u, init) => {
         const h = new Headers(init?.headers);
         sigs.push(h.get("signature")!);
         inputs.push(h.get("signature-input")!);
         return Response.json({ ok: true });
-      },
+      }),
     });
     await client.fetch("/api/v1/tokens/validate", { method: "POST", body: { a: 1 } });
     await client.fetch("/api/v1/tokens/validate", { method: "POST", body: { a: 1 } });
@@ -558,12 +585,12 @@ describe("Nonce, in-flight dedupe and negative cache", () => {
     const client = new Daywalker({
       apiKey: "srv_live_x",
       signingKey: key.privateKeyPkcs8Base64,
-      fetch: async (_u, init) => {
+      fetch: withOAuth(async (_u, init) => {
         inputs.push(new Headers(init?.headers).get("signature-input")!);
         return inputs.length === 1
           ? new Response("{}", { status: 429, headers: { "retry-after": "0" } })
           : Response.json({ ok: true });
-      },
+      }),
     });
     await client.fetch("/api/v1/tokens/validate", {
       method: "POST",
@@ -581,10 +608,10 @@ describe("Nonce, in-flight dedupe and negative cache", () => {
       apiKey: "srv_live_x",
       serviceSlug: "sonalyze",
       negativeCacheTtlMs: 40,
-      fetch: async () => {
+      fetch: withOAuth(async () => {
         calls++;
         return Response.json({ valid: false, message: "bad token" }, { status: 401 });
-      },
+      }),
     });
     const a = await client.validateToken("tok");
     const b = await client.validateToken("tok");

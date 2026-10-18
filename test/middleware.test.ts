@@ -15,6 +15,7 @@ import {
 import { daywalkerAuth as webAuth, toAuthFailureResponse } from "../src/middleware.js";
 import { daywalkerAuth as expressAuth } from "../src/express.js";
 import type { ValidateResult } from "../src/types.js";
+import { withOAuth } from "./helpers/oauth.js";
 
 const env = {};
 const NEXT = "x-middleware-next";
@@ -27,14 +28,14 @@ function countingClient(response: () => Response | Promise<Response>) {
     serviceSlug: "svc",
     maxRetries: 0,
     negativeCacheTtlMs: 0,
-    fetch: (async () => (state.calls++, response())) as typeof fetch,
+    fetch: withOAuth(async () => (state.calls++, response())),
   });
   return { client, state };
 }
 
 /** A client stub that returns a fixed validation result (for codes the real client cannot easily produce). */
 function fixedClient(result: ValidateResult): Daywalker {
-  return { validateToken: async () => result, validateServiceKey: async () => result } as unknown as Daywalker;
+  return { validateToken: async () => result, validateServiceKey: async () => result, validateServiceCredentials: async () => result } as unknown as Daywalker;
 }
 
 const authed = (url: string, init: RequestInit = {}) =>

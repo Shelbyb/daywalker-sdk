@@ -76,7 +76,7 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
  * Throws unless `value` is an https: URL (http: is allowed only for localhost / 127.0.0.1 / [::1]),
- * so API keys, SDK keys and write keys never travel in cleartext.
+ * so API keys, access tokens, SDK keys and write keys never travel in cleartext.
  */
 export function assertSecureUrl(name: string, value: string): void {
   let url: URL;
@@ -107,7 +107,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const apiKey = (options.apiKey ?? env.DAYWALKER_API_KEY ?? "").trim() || null;
   const serviceSlugs = parseServiceSlugs(options.serviceSlugs ?? options.serviceSlug ?? env.DAYWALKER_SERVICE_SLUG);
   const serviceSlug = serviceSlugs[0] ?? null;
-  if (!apiKey) problems.push("DAYWALKER_API_KEY is not set");
+  if (!apiKey) problems.push("DAYWALKER_API_KEY is not set: it is the client credential for the OAuth client credentials grant");
 
   const signingKey = options.signingKey ?? env.DAYWALKER_SIGNING_KEY ?? null;
   const previousSigningKey = options.previousSigningKey ?? env.DAYWALKER_SIGNING_KEY_PREVIOUS ?? null;
