@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 **OAuth access tokens instead of the API key, and hardening against tampering.** Follows the Daywalker API docs: `POST /api/v1/tokens/validate` requires `Authorization: DPoP <access_token>`, and bearer API keys are refused with `401 DPOP_REQUIRED`.
 
 **OAuth**
