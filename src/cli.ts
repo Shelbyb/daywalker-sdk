@@ -8,7 +8,7 @@ import { generateSigningKey, loadSigningKey, registerPublicKey, redactSecrets } 
 const HELP = `daywalker: connect a service to Daywalker Auth (RFC 9421 / Push Architecture)
 
 Usage:
-  daywalker init   --service <slug[,slug…]> [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--force] [--skip-register] [--json|--export] [--print-key]
+  daywalker init   [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--force] [--skip-register] [--json|--export] [--print-key]
   daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--skip-register] [--json|--export] [--print-key]
   daywalker check
 
@@ -178,8 +178,9 @@ async function init(opts: Record<string, string | boolean>) {
   const existing = readEnvFile(envFile);
 
   const slugs = parseServiceSlugs(String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? ""));
-  if (slugs.length === 0 || !slugs.every((s) => /^[a-z0-9_-]+$/.test(s))) {
-    fail("--service must be this service's Daywalker slug (e.g. --service sonalyze), or a comma-separated list when one API key covers several (--service gigpulse,devpulse)");
+  // Optional: requests never name a service. Only needed to verify access tokens offline (audience check).
+  if (!slugs.every((s) => /^[a-z0-9_-]+$/.test(s))) {
+    fail("--service must be Daywalker service slug(s) (e.g. --service sonalyze, or gigpulse,devpulse)");
   }
   const slug = slugs.join(",");
 
@@ -213,7 +214,6 @@ async function init(opts: Record<string, string | boolean>) {
     const regResult = await registerPublicKey({
       authUrl,
       apiKey,
-      serviceSlug: slug,
       domain,
       publicJwk: activeKey.publicJwk,
     });
@@ -233,7 +233,7 @@ async function init(opts: Record<string, string | boolean>) {
   const signingKeyStr = key?.privateKeyPkcs8Base64 ?? existing.get("DAYWALKER_SIGNING_KEY") ?? "";
 
   const envValues: Record<string, string | null> = {
-    DAYWALKER_SERVICE_SLUG: slug,
+    ...(slug ? { DAYWALKER_SERVICE_SLUG: slug } : {}),
     DAYWALKER_KEY_ID: kid,
     DAYWALKER_AUTH_URL: authUrl,
     ...(domain ? { DAYWALKER_DOMAIN: domain } : {}),
@@ -251,9 +251,9 @@ async function init(opts: Record<string, string | boolean>) {
   writeEnvFile(envFile, envValues, { DAYWALKER_SIGNING_KEY_PREVIOUS: PREVIOUS_KEY_COMMENT });
   ensureGitignored(dir, ".env.local");
 
-  console.log(`✔ Daywalker configured for service "${slug}"${domain ? ` (${domain})` : ""}`);
+  console.log(`✔ Daywalker configured${slug ? ` (audience "${slug}")` : ""}${domain ? ` (${domain})` : ""}`);
   console.log(`  • RFC 9421 / RFC 9530 HTTP Message Signing active`);
-  console.log(`  • .env.local: DAYWALKER_SERVICE_SLUG, DAYWALKER_KEY_ID, DAYWALKER_AUTH_URL${domain ? ", DAYWALKER_DOMAIN" : ""}${apiKey ? ", DAYWALKER_API_KEY" : ""}${signingKeyStr ? ", DAYWALKER_SIGNING_KEY" : ""}`);
+  console.log(`  • .env.local: ${slug ? "DAYWALKER_SERVICE_SLUG, " : ""}DAYWALKER_KEY_ID, DAYWALKER_AUTH_URL${domain ? ", DAYWALKER_DOMAIN" : ""}${apiKey ? ", DAYWALKER_API_KEY" : ""}${signingKeyStr ? ", DAYWALKER_SIGNING_KEY" : ""}`);
   if (kid) console.log(`  • Key ID (RFC 7638 thumbprint): ${kid}`);
   if (registered) console.log(`  • Zero-ingress push architecture: public key registered directly`);
   if (previousKey) console.log(`  • Previous key kept as DAYWALKER_SIGNING_KEY_PREVIOUS for rollback; remove it once the new key is deployed.`);
@@ -279,14 +279,13 @@ async function rotate(opts: Record<string, string | boolean>) {
   // The new key only becomes active once Daywalker Auth knows it, so registration must succeed
   // before anything is written (unless the caller explicitly registers it some other way).
   if (!skipRegister(opts)) {
-    if (!apiKey || !slug) {
-      fail("rotate needs DAYWALKER_API_KEY and DAYWALKER_SERVICE_SLUG to register the new key (or pass --skip-register to write it unregistered)");
+    if (!apiKey) {
+      fail("rotate needs DAYWALKER_API_KEY to register the new key (or pass --skip-register to write it unregistered)");
     }
     if (!isJson) console.log(`• Registering new public key (${key.publicJwk.kid}) with Daywalker Auth...`);
     const regResult = await registerPublicKey({
       authUrl,
       apiKey,
-      serviceSlug: slug,
       domain: rotateDomain,
       publicJwk: key.publicJwk,
     });
