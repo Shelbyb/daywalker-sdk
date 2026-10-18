@@ -2,14 +2,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createDaywalker } from "./client.js";
-import { publicHostname } from "./config.js";
+import { parseServiceSlugs, publicHostname } from "./config.js";
 import { generateSigningKey, loadSigningKey, registerPublicKey, redactSecrets } from "./crypto/index.js";
 
 const HELP = `daywalker: connect a service to Daywalker Auth (RFC 9421 / Push Architecture)
 
 Usage:
-  daywalker init   --service <slug> [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--force] [--skip-register] [--json|--export] [--print-key]
-  daywalker rotate [--service <slug>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--skip-register] [--json|--export] [--print-key]
+  daywalker init   --service <slug[,slug…]> [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--force] [--skip-register] [--json|--export] [--print-key]
+  daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--skip-register] [--json|--export] [--print-key]
   daywalker check
 
 init     Generates an Ed25519 keypair, registers the public key directly with Daywalker Auth
@@ -177,12 +177,11 @@ async function init(opts: Record<string, string | boolean>) {
   const envFile = path.join(dir, ".env.local");
   const existing = readEnvFile(envFile);
 
-  const slug = String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? "")
-    .trim()
-    .toLowerCase();
-  if (!slug || !/^[a-z0-9_-]+$/.test(slug)) {
-    fail("--service must be this service's Daywalker slug (e.g. --service sonalyze)");
+  const slugs = parseServiceSlugs(String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? ""));
+  if (slugs.length === 0 || !slugs.every((s) => /^[a-z0-9_-]+$/.test(s))) {
+    fail("--service must be this service's Daywalker slug (e.g. --service sonalyze), or a comma-separated list when one API key covers several (--service gigpulse,devpulse)");
   }
+  const slug = slugs.join(",");
 
   const rawDomain = opts.domain ? String(opts.domain) : existing.get("DAYWALKER_DOMAIN") ?? process.env.DAYWALKER_DOMAIN ?? "";
   let domain: string | null = null;
@@ -270,7 +269,7 @@ async function rotate(opts: Record<string, string | boolean>) {
   const current = existing.get("DAYWALKER_SIGNING_KEY") ?? process.env.DAYWALKER_SIGNING_KEY;
   if (!current) fail("No DAYWALKER_SIGNING_KEY found; run `daywalker init` first");
 
-  const slug = String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? "").trim().toLowerCase();
+  const slug = parseServiceSlugs(String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? "")).join(",");
   const apiKey = await resolveApiKey(opts, existing);
   const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
 
@@ -324,7 +323,8 @@ async function check() {
 
   if (result.ok) {
     console.log(`✔ Daywalker configuration looks good`);
-    if (result.serviceSlug) console.log(`  • Service slug: ${result.serviceSlug}`);
+    if (result.serviceSlugs.length > 1) console.log(`  • Services: ${result.serviceSlugs.join(", ")} (default: ${result.serviceSlug})`);
+    else if (result.serviceSlug) console.log(`  • Service slug: ${result.serviceSlug}`);
     if (result.domain) console.log(`  • Caller domain: ${result.domain}`);
     if (result.keyId) console.log(`  • Key ID: ${result.keyId}`);
     if (result.signing) console.log(`  • RFC 9421 signature signing: ready`);

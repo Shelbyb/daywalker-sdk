@@ -6,7 +6,10 @@ export interface ResolvedConfig {
   /** Never signs; `keys()` publishes its public JWK alongside the current key during rotation. */
   previousSigningKey: string | SigningKey | null;
   keyId: string | null;
+  /** The slug used when a call doesn't name one: the first of `serviceSlugs`. */
   serviceSlug: string | null;
+  /** Every service this deployment is configured for (one API key can cover several). */
+  serviceSlugs: string[];
   domain: string | null;
   domainSource: string | null;
   daywalkerPublicKey: string | PublicJwk | PublicJwks | null;
@@ -87,13 +90,23 @@ export function assertSecureUrl(name: string, value: string): void {
   throw new Error(`${name} must use https:// (http:// is only allowed for localhost); got "${value}"`);
 }
 
+/**
+ * Service slugs from a comma- or whitespace-separated string (`DAYWALKER_SERVICE_SLUG="gigpulse,devpulse"`)
+ * or an array: lower-cased, de-duplicated, in the order given (the first is the default service).
+ */
+export function parseServiceSlugs(value: string | readonly string[] | null | undefined): string[] {
+  const parts = typeof value === "string" ? value.split(/[\s,]+/) : Array.isArray(value) ? value.flatMap((v) => String(v).split(/[\s,]+/)) : [];
+  return Array.from(new Set(parts.map((v) => v.trim().toLowerCase()).filter(Boolean)));
+}
+
 export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const env: Record<string, string | undefined> =
     options.env ?? (typeof process !== "undefined" && process.env ? process.env : {});
   const problems: string[] = [];
 
   const apiKey = (options.apiKey ?? env.DAYWALKER_API_KEY ?? "").trim() || null;
-  const serviceSlug = (options.serviceSlug ?? env.DAYWALKER_SERVICE_SLUG ?? "").trim().toLowerCase() || null;
+  const serviceSlugs = parseServiceSlugs(options.serviceSlugs ?? options.serviceSlug ?? env.DAYWALKER_SERVICE_SLUG);
+  const serviceSlug = serviceSlugs[0] ?? null;
   if (!apiKey) problems.push("DAYWALKER_API_KEY is not set");
   if (!serviceSlug) problems.push("DAYWALKER_SERVICE_SLUG is not set");
 
@@ -145,6 +158,7 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
     previousSigningKey,
     keyId,
     serviceSlug,
+    serviceSlugs,
     domain,
     domainSource,
     daywalkerPublicKey,
