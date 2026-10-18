@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 **Client credentials flow with rotating refresh tokens. Needs Daywalker Auth with `POST /api/v1/oauth/token`; breaking for `issueLease()` users.**
 - New `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()` and `client.accessToken()` (auto-refresh, serialized, falls back to the client credentials when the session ended). **`issueLease()` is removed** (`/api/v1/leases/issue` no longer exists).
 - No request carries a service slug any more: `validateToken()` stops sending `serviceSlug`, `DAYWALKER_SERVICE_SLUG` is optional (offline audience check only), and `init` / `rotate` no longer require `--service` or send a slug when registering a key.
