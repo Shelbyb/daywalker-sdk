@@ -164,7 +164,7 @@ describe("Next middleware: /api detection and Host allowlist", () => {
   });
 
   it("refuses requests without a Host header when allowedHosts is set", async () => {
-    const { client } = countingClient(() => Response.json({ valid: true, tenantId: "t" }));
+    const { client } = countingClient(() => Response.json({ valid: true, serviceSlug: "svc", tenantId: "t" }));
     const mw = createDaywalkerMiddleware({ client, allowedHosts: ["app.example"] });
     assert.strictEqual((await mw(authed("https://app.example/dashboard"))).status, 403);
     assert.strictEqual((await mw(authed("https://app.example/dashboard", { headers: { host: "evil.example" } }))).status, 403);

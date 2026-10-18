@@ -91,7 +91,7 @@ describe("JWT lease claims", () => {
   const { privateKey } = crypto.generateKeyPairSync("ed25519");
   const pubJwk = crypto.createPublicKey(privateKey).export({ format: "jwk" }) as any;
   const now = Math.floor(Date.now() / 1000);
-  const jwt = (payload: Record<string, unknown>, header: Record<string, unknown> = { alg: "EdDSA", typ: "JWT" }) => {
+  const jwt = (payload: Record<string, unknown>, header: Record<string, unknown> = { alg: "EdDSA", typ: "at+jwt" }) => {
     const h = Buffer.from(JSON.stringify(header)).toString("base64url");
     const b = Buffer.from(JSON.stringify({ jti: "j1", iss: "https://auth.daywalker.dev", ...payload })).toString("base64url");
     return `${h}.${b}.${crypto.sign(null, Buffer.from(`${h}.${b}`), privateKey).toString("base64url")}`;
@@ -99,11 +99,15 @@ describe("JWT lease claims", () => {
   const verify = (token: string, extra: Record<string, unknown> = {}) =>
     verifyJwtLease({ token, publicKey: pubJwk, expectedServiceSlug: "myservice", currentTime: now, ...extra });
 
-  it("requires exp, an expected audience, a matching aud/serviceSlug, iss and typ", async () => {
+  it("requires exp, an expected audience, a matching aud, iss and typ at+jwt", async () => {
     assert.strictEqual((await verify(jwt({ aud: "myservice", exp: now + 60 }))).valid, true);
     assert.match((await verify(jwt({ aud: "myservice" }))).error!, /no numeric exp/);
     assert.match((await verify(jwt({ aud: "myservice", exp: now + 60 }), { expectedServiceSlug: undefined })).error!, /no expected service slug/);
-    assert.match((await verify(jwt({ exp: now + 60 }))).error!, /no aud or serviceSlug/);
+    assert.match((await verify(jwt({ exp: now + 60 }))).error!, /no aud claim/);
+    assert.match((await verify(jwt({ serviceSlug: "myservice", exp: now + 60 }))).error!, /no aud claim/);
+    assert.match((await verify(jwt({ aud: "myservice", exp: now + 60 }, { alg: "EdDSA", typ: "JWT" }))).error!, /typ/);
+    assert.match((await verify(jwt({ aud: "myservice", exp: now + 60 }, { alg: "EdDSA" }))).error!, /typ/);
+    assert.match((await verify("a".repeat(20_000))).error!, /too long/);
     assert.match((await verify(jwt({ aud: "other", serviceSlug: "myservice", exp: now + 60 }))).error!, /mismatch/);
     assert.match((await verify(jwt({ aud: "myservice", exp: now + 60, iss: "https://evil" }), { expectedIssuer: "https://auth.daywalker.dev" })).error!, /issuer mismatch/);
     assert.match((await verify(jwt({ aud: "myservice", exp: now + 60 }, { alg: "EdDSA", typ: "rt+jwt" }))).error!, /typ/);
@@ -114,13 +118,14 @@ describe("JWT lease claims", () => {
     assert.match((await verify(jwt({ aud: "myservice", exp: now - 31 }))).error!, /expired/);
   });
 
-  it("never caches a lease past its exp", async () => {
+  it("verifies offline, and keeps its cache out of reach of other code", async () => {
     const client = new Daywalker({ serviceSlug: "myservice", daywalkerPublicKey: pubJwk, cacheTtlMs: 600_000, fetch: withOAuth(async () => Response.json({})) });
-    const exp = Math.floor(Date.now() / 1000) + 5;
-    const result = await client.validateToken(jwt({ aud: "myservice", exp }));
+    const result = await client.validateToken(jwt({ aud: "myservice", exp: Math.floor(Date.now() / 1000) + 5 }));
     assert.strictEqual(result.ok, true);
-    const [entry] = [...(client as any)._cache.values()];
-    assert.ok(entry.expiresAt <= exp * 1000);
+    assert.strictEqual(result.ok && result.data.offlineVerified, true);
+    // ES private fields: nothing outside the class can read or poison the cache, tokens or config.
+    for (const name of ["_cache", "_tokens", "_config", "_rawConfig", "_dpopKey"]) assert.strictEqual((client as any)[name], undefined, name);
+    assert.ok(Object.isFrozen(client));
   });
 });
 
@@ -128,7 +133,7 @@ describe("Per-request auth never falls back to the service key", () => {
   it("rejects requests without a token with 401 and never calls Daywalker", async () => {
     let calls = 0;
     const tokenRequests: TokenRequestLog[] = [];
-    const client = new Daywalker({ apiKey: "srv_live_service_key", serviceSlug: "svc", fetch: withOAuth(async () => (calls++, Response.json({ valid: true, tenantId: "t" })), { log: tokenRequests }) });
+    const client = new Daywalker({ apiKey: "srv_live_service_key", serviceSlug: "svc", fetch: withOAuth(async () => (calls++, Response.json({ valid: true, serviceSlug: "myservice", tenantId: "t" })), { log: tokenRequests }) });
     const mw = createDaywalkerMiddleware({ client });
     const res = await mw(new Request("https://app.example.com/api/data"));
     assert.strictEqual(res.status, 401);
@@ -155,19 +160,26 @@ describe("Next middleware static bypass", () => {
     for (const p of ["/_next/data/build/page.json", "/api/report.js", "/api/x.png", "/dashboard", "/export.pdf", "/_next/webpack-hmr"]) {
       assert.strictEqual(isStaticAssetPath(p, STATIC_FILE_EXTENSIONS), false, p);
     }
-    const client = new Daywalker({ serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true })) });
+    const client = new Daywalker({ serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true, serviceSlug: "svc" })) });
     const mw = createDaywalkerMiddleware({ client, protectApiOnly: true });
     assert.strictEqual((await mw(new Request("https://app.example.com/api/report.js"))).status, 401);
   });
 });
 
 describe("Validation cache", () => {
-  it("is bounded and keyed by a token hash, not the raw token", async () => {
-    const client = new Daywalker({ apiKey: "srv_live_k", serviceSlug: "svc", fetch: withOAuth(async () => Response.json({ valid: true, tenantId: "t" })) });
+  it("is bounded: the least recently used entry is evicted", async () => {
+    const seen: string[] = [];
+    const client = new Daywalker({
+      apiKey: "srv_live_k",
+      serviceSlug: "svc",
+      fetch: withOAuth(async (_u, init) => (seen.push(JSON.parse(String(init?.body)).token), Response.json({ valid: true, serviceSlug: "svc", tenantId: "t" }))),
+    });
     for (let i = 0; i < MAX_VALIDATION_CACHE_ENTRIES + 50; i++) await client.validateToken(`tok_raw_secret_${i}`);
-    const keys = [...(client as any)._cache.keys()] as string[];
-    assert.strictEqual(keys.length, MAX_VALIDATION_CACHE_ENTRIES);
-    assert.strictEqual(keys.some((k) => k.includes("tok_raw_secret")), false);
+    const before = seen.length;
+    await client.validateToken(`tok_raw_secret_${MAX_VALIDATION_CACHE_ENTRIES + 49}`); // still cached
+    assert.strictEqual(seen.length, before);
+    await client.validateToken("tok_raw_secret_0"); // evicted
+    assert.strictEqual(seen.length, before + 1);
   });
 });
 
@@ -202,16 +214,21 @@ describe("Transport security", () => {
 });
 
 describe("CLI secret handling", () => {
-  it("chmods an existing env file to 0600 and warns about --api-key", { skip: process.platform === "win32" }, () => {
+  it("chmods an existing env file to 0600, and refuses --api-key on the command line", { skip: process.platform === "win32" }, () => {
     const cli = path.resolve("dist/cli.js");
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "daywalker-cli-"));
     try {
       const envFile = path.join(dir, ".env.local");
       fs.writeFileSync(envFile, "OTHER=1\n", { mode: 0o644 });
       fs.chmodSync(envFile, 0o644);
-      const run = spawnSync(process.execPath, [cli, "init", "--service", "svc", "--api-key", "srv_live_cli", "--skip-register"], { cwd: dir, encoding: "utf8" });
+      const refused = spawnSync(process.execPath, [cli, "init", "--service", "svc", "--api-key", "srv_live_cli", "--skip-register"], { cwd: dir, encoding: "utf8" });
+      assert.strictEqual(refused.status, 1);
+      assert.match(refused.stderr, /--api-key is not supported/);
+      assert.strictEqual(refused.stderr.includes("srv_live_cli"), false);
+
+      const { DAYWALKER_API_KEY: _ignored, ...env } = process.env;
+      const run = spawnSync(process.execPath, [cli, "init", "--service", "svc", "--skip-register"], { cwd: dir, encoding: "utf8", env: { ...env, DAYWALKER_API_KEY: "srv_live_cli" } });
       assert.strictEqual(run.status, 0, run.stderr);
-      assert.match(run.stderr, /--api-key exposes the key/);
       assert.strictEqual(fs.statSync(envFile).mode & 0o777, 0o600);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

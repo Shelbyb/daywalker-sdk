@@ -1,11 +1,29 @@
 # Changelog
 
 ## Unreleased
-**OAuth access tokens instead of the API key.** Follows the Daywalker API docs: `POST /api/v1/tokens/validate` requires `Authorization: DPoP <access_token>`, and bearer API keys are refused with `401 DPOP_REQUIRED`.
+**OAuth access tokens instead of the API key, and hardening against tampering.** Follows the Daywalker API docs: `POST /api/v1/tokens/validate` requires `Authorization: DPoP <access_token>`, and bearer API keys are refused with `401 DPOP_REQUIRED`.
+
+**OAuth**
 - **Breaking:** `client.fetch()` and `validateToken()` no longer send `Authorization: Bearer <apiKey>`. They send `Authorization: DPoP <access token>` with a DPoP proof, getting and refreshing the token through the client credentials flow (`accessToken()`) on demand. A `401 ACCESS_TOKEN_EXPIRED` refreshes the token and retries once.
 - `DAYWALKER_API_KEY` is now only the OAuth client credential: it is sent on the `client_credentials` grant (with the RFC 9421 signature) and by `daywalker init` / `rotate` to register the signing key, nowhere else. The `refresh_token` grant no longer sends it.
+- `getTokens()` narrows the grant to the configured service slug(s) by default (least privilege).
 - A failed client credentials grant makes `validateToken()` return `503 SERVICE_UNAVAILABLE` (never a `401` for the caller's token); a missing `DAYWALKER_API_KEY` is `500 CONFIGURATION_ERROR`.
-- New `client.validateServiceCredentials()`: the service health check now runs the client credentials grant and checks the granted services instead of validating the API key as a token (`403 SERVICE_NOT_GRANTED` when the configured service isn't covered). `validateServiceKey()` is a deprecated alias, and `createDaywalkerServiceHealthMiddleware` uses the new check.
+- New `client.validateServiceCredentials()`: the service health check runs the client credentials grant and checks the granted services (`403 SERVICE_NOT_GRANTED` when the configured service isn't covered). `createDaywalkerServiceHealthMiddleware` and `npx daywalker check` use it (`check --offline` skips it).
+
+**Removed (API-key-era leftovers)**
+- **Breaking:** `validateServiceKey()`, `signRequest({ apiKey })`, the Express `daywalkerKeys()` key-pull endpoint (`/.well-known/daywalker-keys.json`; keys are registered by push with `POST /api/v1/keys/register`), the unused `src/signing.ts`, and the CLI's `--api-key <key>` flag (now an error; use `DAYWALKER_API_KEY` or `--api-key-stdin`).
+- **Breaking:** offline verification accepts only RFC 9068 access tokens: `typ: at+jwt`, `alg: EdDSA`, and the service in `aud`. Lease-era tokens (`typ: JWT`, a `serviceSlug` claim, `alg: ed25519`) are refused, and `leaseServices()` no longer reads `serviceSlug` / `service`.
+
+**Hardening**
+- **Breaking:** incoming DPoP-bound access tokens (`cnf.jkt`) need `Authorization: DPoP` and a valid DPoP proof (method, URL, key thumbprint, `ath`, fresh `iat`, single-use `jti`), checked even for cached results. New `verifyDpopProof()`, `publicOrigin` / `DAYWALKER_PUBLIC_ORIGIN` (for proxies) and `dpopReplayStore`.
+- **Breaking:** an online validation answer must name the service it was validated for, and that must be this service. A token for a sibling service the credentials also cover is refused with `403 SERVICE_NOT_GRANTED`; an answer naming no service fails closed (503). Adapters map 403 through.
+- **Breaking:** client state is in ES `#private` fields; the class, its prototype and instances are frozen; the default `daywalker` proxy refuses writes. `client.config` is frozen and shows secrets as `"[configured]"`. The options object is read once.
+- WebCrypto is captured at load, so patching `crypto.subtle` later can't fool verification. The SDK's DPoP key is non-extractable.
+- The Next adapter no longer uses a `NextResponse` from `globalThis`.
+- Adapters share one strict credential reader (`readCredentials`): `Bearer` or `DPoP` only, no silent fallback to `x-api-token` behind an unknown `Authorization` scheme, no repeated headers, length caps.
+- Incoming tokens must be ≤ 8 KiB of token characters, or they're refused without calling Daywalker. `cacheTtlMs` and `negativeCacheTtlMs` are capped at 5 minutes.
+- Token endpoint answers are checked: `token_type` must be `DPoP`, tokens must be well-formed, the lifetime is capped at what `expires_in` allows, and results are frozen. Response bodies from Daywalker are capped at 1 MiB, and requests use `cache: "no-store"`.
+- `registerPublicKey()` refuses redirects, times out after 10s, and validates the domain, service slugs, API key and public JWK before sending anything. `authUrl` / `publicOrigin` can't carry credentials. `hexToBytes()` rejects invalid hex.
 
 ## 0.6.0
 **Client credentials flow with rotating refresh tokens. Needs Daywalker Auth with `POST /api/v1/oauth/token`; breaking for `issueLease()` users.**

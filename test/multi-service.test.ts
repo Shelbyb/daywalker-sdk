@@ -36,7 +36,7 @@ function lease(overrides: Record<string, unknown> = {}) {
     exp: now() + 3600,
     ...overrides,
   };
-  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
+  const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "at+jwt" })).toString("base64url");
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = crypto.sign(null, Buffer.from(`${header}.${body}`, "utf8"), privateKey).toString("base64url");
   return `${header}.${body}.${sig}`;
@@ -93,22 +93,22 @@ describe("JWT lease listing several services", () => {
     assert.strictEqual((await verifyJwtLease({ token: bad, publicKey: pubJwk, expectedServiceSlug: "devpulse" })).valid, false);
   });
 
-  it("still verifies leases issued before multi-service tokens", async () => {
+  it("refuses lease-era tokens that name their service in a serviceSlug claim instead of aud", async () => {
     const old = lease({ services: undefined, aud: undefined, service: undefined, serviceSlug: "gigpulse" });
-    assert.strictEqual((await verifyJwtLease({ token: old, publicKey: pubJwk, expectedServiceSlug: "gigpulse" })).valid, true);
+    assert.match((await verifyJwtLease({ token: old, publicKey: pubJwk, expectedServiceSlug: "gigpulse" })).error!, /no aud/);
   });
 
   it("lists the services of any lease shape", () => {
     assert.deepStrictEqual(leaseServices({ services: ["A", "b", "a"] }), ["a", "b"]);
     assert.deepStrictEqual(leaseServices({ aud: ["x", "y"] }), ["x", "y"]);
     assert.deepStrictEqual(leaseServices({ aud: "x" }), ["x"]);
-    assert.deepStrictEqual(leaseServices({ serviceSlug: "legacy" }), ["legacy"]);
-    assert.deepStrictEqual(leaseServices({ service: "one" }), ["one"]);
+    assert.deepStrictEqual(leaseServices({ serviceSlug: "legacy" }), []);
+    assert.deepStrictEqual(leaseServices({ service: "one" }), []);
     assert.deepStrictEqual(leaseServices({}), []);
   });
 
   it("validateToken reports every service on an offline-verified lease", async () => {
-    const client = new Daywalker({ apiKey: "k", serviceSlug: "devpulse", daywalkerPublicKey: pubJwk });
+    const client = new Daywalker({ apiKey: "srv_live_k", serviceSlug: "devpulse", daywalkerPublicKey: pubJwk });
     const res = await client.validateToken({ token: lease(), offlineOnly: true });
     assert.strictEqual(res.ok, true);
     if (res.ok) {
@@ -117,13 +117,13 @@ describe("JWT lease listing several services", () => {
       assert.strictEqual(res.data.offlineVerified, true);
     }
 
-    const wrong = new Daywalker({ apiKey: "k", serviceSlug: "sonalyze", daywalkerPublicKey: pubJwk });
+    const wrong = new Daywalker({ apiKey: "srv_live_k", serviceSlug: "sonalyze", daywalkerPublicKey: pubJwk });
     const rejected = await wrong.validateToken({ token: lease(), offlineOnly: true });
     assert.strictEqual(rejected.ok, false);
   });
 
   it("validates a lease for any configured service when several are configured", async () => {
-    const client = new Daywalker({ apiKey: "k", serviceSlug: "gigpulse,devpulse", daywalkerPublicKey: pubJwk });
+    const client = new Daywalker({ apiKey: "srv_live_k", serviceSlug: "gigpulse,devpulse", daywalkerPublicKey: pubJwk });
     const token = lease();
     assert.strictEqual((await client.validateToken({ token, offlineOnly: true })).ok, true);
     assert.strictEqual((await client.validateToken({ token, serviceSlug: "devpulse", offlineOnly: true })).ok, true);
@@ -134,7 +134,7 @@ describe("online validation of a multi-service token", () => {
   it("surfaces the services list, and falls back to the validated slug from older servers", async () => {
     const answer = (extra: Record<string, unknown>) =>
       new Daywalker({
-        apiKey: "k",
+        apiKey: "srv_live_k",
         serviceSlug: "devpulse",
         fetch: withOAuth(async () =>
           Response.json({ valid: true, serviceSlug: "devpulse", tenantId: "t", rateLimit: { limit: 1, remaining: 1, reset: 1 }, ...extra })),
@@ -157,7 +157,7 @@ describe("client credentials tokens", () => {
   const tokenBody = (n: number, extra: Record<string, unknown> = {}) => ({
     access_token: `access-${n}`,
     refresh_token: `refresh-${n}`,
-    token_type: "Bearer",
+    token_type: "DPoP",
     expires_in: 900,
     expires_at: Math.floor(Date.now() / 1000) + 900,
     refresh_expires_in: 2592000,
@@ -304,7 +304,7 @@ describe("CLI init with several services", () => {
       assert.strictEqual(bodies.at(-1).serviceSlug, undefined);
       assert.match(fs.readFileSync(path.join(dir, ".env.local"), "utf8"), /^DAYWALKER_SERVICE_SLUG="gigpulse,devpulse"$/m);
 
-      const check = await run(dir, ["check"], { DAYWALKER_API_KEY: "srv_live_multi" });
+      const check = await run(dir, ["check", "--offline"], { DAYWALKER_API_KEY: "srv_live_multi" });
       assert.match(check.stdout, /Services: gigpulse, devpulse \(default: gigpulse\)/);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

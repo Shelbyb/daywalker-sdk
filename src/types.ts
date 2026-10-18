@@ -24,6 +24,26 @@ export interface TokenPayload {
   [key: string]: unknown;
 }
 
+/** The DPoP proof that came with an incoming `Authorization: DPoP <token>` request. */
+export interface IncomingDpop {
+  /** The `DPoP` header. */
+  proof: string | null | undefined;
+  method: string;
+  /** The full request URL (its origin is replaced by `publicOrigin` when configured). */
+  url: string;
+}
+
+export interface ValidateTokenOptions {
+  serviceSlug?: string;
+  forceRefresh?: boolean;
+  offlineOnly?: boolean;
+  /**
+   * The request's DPoP proof. Required to accept a DPoP-bound (`cnf.jkt`) access token; the adapters pass
+   * it for you. A bound token without a valid proof is refused with DPOP_REQUIRED / INVALID_DPOP_PROOF.
+   */
+  dpop?: IncomingDpop;
+}
+
 export type ValidateErrorCode =
   | "EXPIRED"
   | "REVOKED"
@@ -32,6 +52,9 @@ export type ValidateErrorCode =
   | "NETWORK_ERROR"
   | "SERVICE_UNAVAILABLE"
   | "CONFIGURATION_ERROR"
+  | "SERVICE_NOT_GRANTED"
+  | "DPOP_REQUIRED"
+  | "INVALID_DPOP_PROOF"
   | string;
 
 /**
@@ -94,6 +117,10 @@ export interface RetryOptions {
 }
 
 export interface DaywalkerConfig {
+  /**
+   * The OAuth client credential (env DAYWALKER_API_KEY). Sent only on the client credentials grant to
+   * `POST /api/v1/oauth/token`; every other request carries a DPoP-bound access token.
+   */
   apiKey?: string;
   signingKey?: string | SigningKey;
   /**
@@ -125,6 +152,14 @@ export interface DaywalkerConfig {
   maxRetries?: number;
   /** Defaults for `fetch()` retries; per-request `init.retry` overrides individual fields. */
   retry?: RetryOptions;
+  /**
+   * Origin clients use to reach this service (e.g. `https://api.example.com`), for checking the `htu` of
+   * DPoP proofs that come with bound access tokens. Defaults to the request URL's origin; set it behind a
+   * proxy or load balancer that rewrites the host.
+   */
+  publicOrigin?: string;
+  /** Shared store for DPoP proof `jti`s (default: per-process memory). Needed with several instances. */
+  dpopReplayStore?: ReplayStore;
   /** Per-attempt timeout for requests to Daywalker Auth. Default 5000ms; 0 disables. */
   timeoutMs?: number;
   fetch?: typeof fetch;
@@ -193,8 +228,6 @@ export interface SignRequestParams {
   created?: number;
   keyid?: string;
   alg?: string;
-  /** Sets `Authorization: Bearer <apiKey>` on the returned headers (not covered by the signature). */
-  apiKey?: string;
   /** Must be 1-128 of `[A-Za-z0-9_.-]` so it can't inject Signature-Input parameters. */
   nonce?: string;
 }
