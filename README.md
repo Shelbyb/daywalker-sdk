@@ -57,6 +57,24 @@ DAYWALKER_API_KEY=srv_live_... npx daywalker init --service my-service-slug --do
 
 The private key is never printed unless you pass `--print-key`.
 
+### Or: ephemeral keys (nothing stored anywhere)
+
+With `ephemeralKey`, each process generates its signing key in memory as a **non-extractable** key. It registers that key with a lifetime and replaces it in place before it expires. There's no private key in env vars, files or a store, and nothing to rotate by hand:
+
+```ts
+const client = new Daywalker({
+  ephemeralKey: { ttlSeconds: 21_600, instanceId: process.env.HOSTNAME }, // or DAYWALKER_EPHEMERAL_KEY=true
+});
+process.on("SIGTERM", async () => {
+  await client.close(); // revokes the key (and the OAuth sessions it started)
+  process.exit(0);
+});
+```
+
+- **Lifetime** (`ttlSeconds`, env `DAYWALKER_KEY_TTL_SECONDS`): 1 hour to 30 days, default 6 hours. When a quarter of it is left, a new key is registered in the same slot. Requests keep using the old key until the new one is ready, and Daywalker keeps the old key valid for 10 more minutes. The next OAuth session starts with the new key.
+- **Slot** (`instanceId`, env `DAYWALKER_INSTANCE_ID`): one key per (domain, slot). Registering in an occupied slot retires the previous key. Default: a random slot per process.
+- **Limit:** Daywalker allows 20 live keys per domain. Give long-lived instances a stable `instanceId` so a restart replaces its own key, call `close()` on shutdown, and use a shared `keyStore` instead on serverless platforms with many short-lived instances. When the domain is full, the error says so: list keys with `npx daywalker keys` and revoke unused ones with `npx daywalker revoke <keyId>`.
+
 ### Or: provision the key automatically
 
 Instead of running `init` and copying `DAYWALKER_SIGNING_KEY` into every environment, give the client a **key store**. On first use it loads the key from the store, or generates one, registers it for the service's domain (`POST /api/v1/keys/register`, with `DAYWALKER_API_KEY`) and saves it:
@@ -80,7 +98,7 @@ All you need is `DAYWALKER_API_KEY` and a domain. The domain is detected from `V
 | `envKeyStore(env?)` | `@shelbyb/daywalker-sdk/keystore` | Read-only: the key `daywalker init` wrote to the environment |
 | your own | — | Serverless and several instances: any shared store with an atomic create-if-absent (Redis `SET key value NX`, Vercel / Cloudflare KV, a secrets manager) |
 
-A store is `{ load(), saveIfAbsent?(record) }`. `saveIfAbsent` must be atomic: when several instances start at once, exactly one save wins and the others load the winner's key. Each of them may already have registered its own key, so the SDK warns with the id of the unused one to revoke in the dashboard.
+A store is `{ load(), saveIfAbsent?(record) }`. `saveIfAbsent` must be atomic: when several instances start at once, exactly one save wins and the others load the winner's key. Each of them may already have registered its own key; the losers revoke theirs right away (`DELETE /api/v1/keys/{keyId}`). Stored keys don't expire; every key the SDK registers gets its own slot (`dw-<keyId>`), so registering one never retires a key another deployment is still using.
 
 ```ts
 const redisKeyStore = (redis) => ({
@@ -124,6 +142,7 @@ Your KMS must support Ed25519 (pure EdDSA over the message, not a pre-hashed var
 | `DAYWALKER_KEY_ID` | optional | RFC 7638 JWK thumbprint derived during key generation |
 | `DAYWALKER_SIGNING_KEY_PREVIOUS` | during rotation | Previous private key, maintained during deployment transitions |
 | `DAYWALKER_DOMAIN` | when not detected | The service's public domain: the key is registered for it. Detected from your platform's URL variables when unset |
+| `DAYWALKER_EPHEMERAL_KEY` | optional | `true` for [ephemeral signing keys](#or-ephemeral-keys-nothing-stored-anywhere), with `DAYWALKER_KEY_TTL_SECONDS` and `DAYWALKER_INSTANCE_ID` |
 | `DAYWALKER_PUBLIC_KEY` | optional | Daywalker Auth public key for zero-egress offline JWT lease verification |
 | `DAYWALKER_AUTH_URL` | optional | Defaults to `https://auth.daywalker.dev`; must be `https://` (except localhost) |
 | `DAYWALKER_LEASE_ISSUER` | optional | Expected `iss` of offline-verified JWTs (default `https://auth.daywalker.dev`) |
@@ -367,7 +386,9 @@ Tokens must be RFC 9068 access tokens (`typ: at+jwt`, `alg: EdDSA`) with a numer
 |---|---|
 | `npx daywalker init --service <slug[,slug…]> [--domain <host>] [--api-key-stdin] [--skip-register] [--force] [--json]` | Generate Ed25519 key, register with Daywalker Auth, and write `.env.local` or output JSON |
 | `npx daywalker check [--offline]` | Validate configuration and signature readiness, then run the OAuth client credentials grant to confirm the credentials work and cover the configured service(s) (`--offline` skips that) |
-| `npx daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--skip-register] [--json]` | Generate and register a new key while preserving the previous key in `.env.local` |
+| `npx daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--skip-register] [--json]` | Generate and register a new key while preserving the previous key in `.env.local`. The previous key stays registered until you revoke it, so running deployments keep working |
+| `npx daywalker keys [--domain <host>] [--json]` | List the domain's signing keys: status, slot, expiry, last use, and which one is current or previous |
+| `npx daywalker revoke <keyId> [--force]` | Revoke a key now; Daywalker also ends the OAuth sessions it started. Refuses the current `DAYWALKER_KEY_ID` unless `--force` |
 
 ---
 
@@ -376,7 +397,9 @@ Tokens must be RFC 9068 access tokens (`typ: at+jwt`, `alg: EdDSA`) with a numer
 | Endpoint | SDK usage | Notes |
 |---|---|---|
 | `POST /api/v1/tokens/validate` | `client.validateToken()` | `Authorization: DPoP <access_token>` + `DPoP` proof; body `{ token }`; signed with `Signature-Input`, `Signature`, `Content-Digest`. Errors: `400` (`DIGEST_MISMATCH`/missing fields), `401` (`INVALID_SIGNATURE`, `DPOP_REQUIRED`, `INVALID_DPOP_PROOF`, `DPOP_REPLAY`, `ACCESS_TOKEN_EXPIRED`, invalid token), `403` (`SERVICE_NOT_GRANTED`, allowlist), `429`. Response includes `valid`, `tokenId`, `tokenName`, `userId`, `stage`, `rateLimit`, `rateLimitHourly` and `X-RateLimit-*` / `X-RateLimit-Hourly-*` headers |
-| `POST /api/v1/keys/register` | `npx daywalker init` / `rotate` | `Authorization: Bearer <API key>` (bootstraps the signing key the client credentials grant needs); body `{ keyId, domain, publicKey, serviceSlug? }`; `403 service_not_covered` if the key doesn't cover `serviceSlug` |
+| `POST /api/v1/keys/register` | `registerPublicKey()`, `npx daywalker init` / `rotate`, `keyStore` / `ephemeralKey` provisioning | `Authorization: Bearer <API key>` (bootstraps the signing key the client credentials grant needs); body `{ keyId, domain, publicKey, serviceSlug?, instanceId?, ttlSeconds?, expiresAt? }`. `200` re-registration (idempotent), `201` new; `409 KEY_LIMIT_REACHED` (20 live keys per domain) or `KEY_ID_CONFLICT`; `403 domain_not_allowed`. The SDK always passes an `instanceId`, because without one Daywalker retires every other slot-less key of the domain after 10 minutes |
+| `GET /api/v1/keys?domain=` | `listSigningKeys()`, `npx daywalker keys` | The domain's keys with `status`, `instanceId`, `expiresAt`, `lastUsedAt` |
+| `DELETE /api/v1/keys/{keyId}` | `revokeSigningKey()`, `client.close()`, `npx daywalker revoke` | Revokes now and ends the OAuth sessions started with the key |
 | `POST /api/v1/oauth/token` | `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()`, `client.accessToken()` (called for you by `validateToken()` / `fetch()`) | `client_credentials` (API key as Bearer + signed request, mandatory DPoP) and `refresh_token` grants return `{ accessToken, refreshToken, expiresAt, services, … }`; tokens are sender-constrained via DPoP (RFC 9449), refresh tokens rotate, and reuse revokes the session |
 | `GET /.well-known/jwks.json` | `client.fetchJwks()` | Daywalker public JWKS for offline lease verification |
 

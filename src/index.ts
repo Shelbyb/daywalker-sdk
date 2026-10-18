@@ -74,6 +74,11 @@ export {
   verifyJwtLease,
   leaseServices,
   registerPublicKey,
+  listSigningKeys,
+  revokeSigningKey,
+  keySlotFor,
+  MIN_KEY_TTL_SECONDS,
+  MAX_KEY_TTL_SECONDS,
   verifyDpopProof,
   MAX_DPOP_PROOF_LENGTH,
   DPOP_MAX_AGE_SECONDS,
@@ -97,6 +102,8 @@ export type {
   VerifySignatureResult,
   ReplayStore,
   VerifyDpopProofParams,
+  SigningKeyRecord,
+  KeyApiResult,
 } from "./crypto/index.js";
 
 export { buildTokenCookie, clearTokenCookie, daywalkerCookies, accessTokenUser } from "./cookies.js";

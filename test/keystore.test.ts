@@ -15,9 +15,14 @@ const DOMAIN = "app.example.com";
 /** A fake Daywalker: records key registrations and the validate requests it receives. */
 function fakeDaywalker(options: { register?: () => Response | Promise<Response> } = {}) {
   const registered: { authorization: string | null; body: any }[] = [];
+  const revoked: string[] = [];
   const validated: { headers: Headers; body: string }[] = [];
   const fetch = withOAuth(async (url, init) => {
     const href = String(url);
+    if (init?.method === "DELETE" && href.includes("/api/v1/keys/")) {
+      revoked.push(decodeURIComponent(href.slice(href.lastIndexOf("/") + 1)));
+      return Response.json({ success: true });
+    }
     if (href.endsWith("/api/v1/keys/register")) {
       const body = JSON.parse(String(init?.body));
       registered.push({ authorization: new Headers(init?.headers).get("authorization"), body });
@@ -26,7 +31,7 @@ function fakeDaywalker(options: { register?: () => Response | Promise<Response> 
     validated.push({ headers: new Headers(init?.headers), body: String(init?.body) });
     return Response.json({ valid: true, serviceSlug: "svc", tenantId: "t" });
   });
-  return { fetch, registered, validated };
+  return { fetch, registered, validated, revoked };
 }
 
 async function signedBy(req: { headers: Headers; body: string }, publicKey: PublicJwk) {
@@ -55,6 +60,9 @@ describe("Auto-provisioning with a key store", () => {
     assert.equal(reg.authorization, "Bearer srv_live_service_key");
     assert.equal(reg.body.domain, DOMAIN);
     assert.equal(reg.body.serviceSlug, "svc");
+    // Its own slot, so it never demotes another instance's key; no TTL for a stored key.
+    assert.equal(reg.body.instanceId, `dw-${reg.body.keyId}`);
+    assert.equal(reg.body.ttlSeconds, undefined);
     assert.equal("d" in reg.body.publicKey, false);
 
     const stored = (await store.load())!;
@@ -70,7 +78,7 @@ describe("Auto-provisioning with a key store", () => {
     assert.equal(dw.registered.length, 1);
   });
 
-  it("settles concurrent first starts on one stored key and reports the orphan", async () => {
+  it("settles concurrent first starts on one stored key and revokes the orphan", async () => {
     const store = memoryKeyStore();
     // Slow registration, so both instances register before either saves (the worst case).
     const dw = fakeDaywalker({ register: () => new Promise((r) => setTimeout(() => r(Response.json({}, { status: 201 })), 30)) });
@@ -83,9 +91,9 @@ describe("Auto-provisioning with a key store", () => {
       assert.equal(a!.keyId, stored.keyId);
       assert.equal(b!.keyId, stored.keyId);
       assert.equal(dw.registered.length, 2);
-      assert.equal(warnings.length, 1);
       const orphan = dw.registered.map((r) => r.body.keyId).find((k) => k !== stored.keyId);
-      assert.match(warnings[0], new RegExp(`${orphan}.*Revoke it`));
+      assert.deepEqual(dw.revoked, [orphan]);
+      assert.equal(warnings.length, 0);
     } finally {
       console.warn = warn;
     }

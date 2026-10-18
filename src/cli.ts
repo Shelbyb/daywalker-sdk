@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createDaywalker } from "./client.js";
 import { parseServiceSlugs, publicHostname } from "./config.js";
-import { generateSigningKey, loadSigningKey, registerPublicKey, redactSecrets } from "./crypto/index.js";
+import { generateSigningKey, keySlotFor, listSigningKeys, loadSigningKey, registerPublicKey, redactSecrets, revokeSigningKey, type KeyApiResult } from "./crypto/index.js";
 
 const HELP = `daywalker: connect a service to Daywalker Auth (RFC 9421 / Push Architecture)
 
@@ -11,16 +11,22 @@ Usage:
   daywalker init   [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--force] [--skip-register] [--json|--export] [--print-key]
   daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--domain <host>] [--auth-url <url>] [--skip-register] [--json|--export] [--print-key]
   daywalker check  [--offline]
+  daywalker keys   [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--json]
+  daywalker revoke <keyId> [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--force]
 
 init     Generates an Ed25519 keypair, registers the public key directly with Daywalker Auth
          (POST /api/v1/keys/register), and writes DAYWALKER_* settings to .env.local (or outputs JSON with --json).
          Nothing is written if registration fails. --force replaces an existing key (kept as
          DAYWALKER_SIGNING_KEY_PREVIOUS for rollback). No public ingress or /.well-known route handlers are required.
 rotate   Generates a new Ed25519 key, registers it with Daywalker Auth, and keeps the old one
-         in .env.local as DAYWALKER_SIGNING_KEY_PREVIOUS during deployment transition.
+         in .env.local as DAYWALKER_SIGNING_KEY_PREVIOUS during deployment transition. The old key stays
+         registered until you revoke it (\`daywalker revoke <keyId>\`) once the new key is deployed everywhere.
          Nothing is written, and the exit code is non-zero, unless registration succeeds.
 check    Validates configuration and signature readiness, then runs the OAuth client credentials grant
          against Daywalker Auth to confirm the credentials work and cover the configured service(s).
+keys     Lists the signing keys registered for the domain (status, slot, expiry, last use).
+revoke   Revokes a signing key now; Daywalker also ends the OAuth sessions it started. Refuses the key in
+         DAYWALKER_KEY_ID (the one this service signs with) unless --force.
 
 Options:
   --api-key-stdin   Read the Daywalker API key from stdin (e.g. \`op read ... | daywalker init --api-key-stdin\`).
@@ -67,6 +73,15 @@ async function resolveApiKey(opts: Record<string, string | boolean>, existing: M
     return fromStdin;
   }
   return String(existing.get("DAYWALKER_API_KEY") ?? process.env.DAYWALKER_API_KEY ?? "").trim() || null;
+}
+
+/** Why a key API call failed, with what to do when the domain is full. */
+function keyApiFailure(what: string, result: KeyApiResult): string {
+  const hint =
+    result.code === "KEY_LIMIT_REACHED"
+      ? "\n  The domain has 20 live keys: list them with `daywalker keys` and revoke unused ones with `daywalker revoke <keyId>`."
+      : "";
+  return `${what} failed (${result.status || "network"}${result.code ? ` ${result.code}` : ""}): ${result.error}${hint}`;
 }
 
 function skipRegister(opts: Record<string, string | boolean>): boolean {
@@ -212,18 +227,20 @@ async function init(opts: Record<string, string | boolean>) {
   }
   if (apiKey && activeKey && !skipRegister(opts)) {
     if (!isJson) console.log(`• Registering public key (${activeKey.publicJwk.kid}) with Daywalker Auth...`);
+    // Each key gets its own slot, so registering it never retires a key a running deployment still uses.
     const regResult = await registerPublicKey({
       authUrl,
       apiKey,
       domain,
       publicJwk: activeKey.publicJwk,
+      instanceId: keySlotFor(activeKey.publicJwk.kid),
     });
     if (regResult.ok) {
       registered = true;
       if (!isJson) console.log(`✔ Public key registered with Daywalker Auth (Push Architecture)`);
     } else {
       fail(
-        `Key registration failed (${regResult.status}): ${regResult.error}\n` +
+        `${keyApiFailure("Key registration", regResult)}\n` +
           `  Nothing was written. Fix the problem and re-run, or pass --skip-register to write the key without registering it.`
       );
     }
@@ -257,7 +274,11 @@ async function init(opts: Record<string, string | boolean>) {
   console.log(`  • .env.local: ${slug ? "DAYWALKER_SERVICE_SLUG, " : ""}DAYWALKER_KEY_ID, DAYWALKER_AUTH_URL${domain ? ", DAYWALKER_DOMAIN" : ""}${apiKey ? ", DAYWALKER_API_KEY" : ""}${signingKeyStr ? ", DAYWALKER_SIGNING_KEY" : ""}`);
   if (kid) console.log(`  • Key ID (RFC 7638 thumbprint): ${kid}`);
   if (registered) console.log(`  • Zero-ingress push architecture: public key registered directly`);
-  if (previousKey) console.log(`  • Previous key kept as DAYWALKER_SIGNING_KEY_PREVIOUS for rollback; remove it once the new key is deployed.`);
+  if (previousKey) {
+    const previousKid = (await loadSigningKey(previousKey).catch(() => null))?.publicJwk.kid;
+    console.log(`  • Previous key kept as DAYWALKER_SIGNING_KEY_PREVIOUS for rollback; it stays registered.`);
+    if (previousKid) console.log(`    Once the new key is deployed everywhere: npx daywalker revoke ${previousKid}`);
+  }
 
   if (opts["print-key"] && signingKeyStr) console.log(`\nDAYWALKER_SIGNING_KEY=${signingKeyStr}`);
 }
@@ -289,9 +310,10 @@ async function rotate(opts: Record<string, string | boolean>) {
       apiKey,
       domain: rotateDomain,
       publicJwk: key.publicJwk,
+      instanceId: keySlotFor(key.publicJwk.kid),
     });
     if (!regResult.ok) {
-      fail(`Key registration failed (${regResult.status}): ${regResult.error}\n  Nothing was written; the current key is still active.`);
+      fail(`${keyApiFailure("Key registration", regResult)}\n  Nothing was written; the current key is still active.`);
     }
     if (!isJson) console.log(`✔ New public key registered with Daywalker Auth`);
   }
@@ -311,7 +333,9 @@ async function rotate(opts: Record<string, string | boolean>) {
 
   writeEnvFile(envFile, envValues, { DAYWALKER_SIGNING_KEY_PREVIOUS: PREVIOUS_KEY_COMMENT });
   console.log(`✔ New key ${key.publicJwk.kid} written; previous key preserved as DAYWALKER_SIGNING_KEY_PREVIOUS.`);
-  console.log(`  After deployment rollout is complete, you may remove DAYWALKER_SIGNING_KEY_PREVIOUS.`);
+  const previousKid = (await loadSigningKey(current).catch(() => null))?.publicJwk.kid;
+  console.log(`  The previous key stays registered, so running deployments keep working.`);
+  if (previousKid) console.log(`  Once the new key is deployed everywhere: npx daywalker revoke ${previousKid}, then remove DAYWALKER_SIGNING_KEY_PREVIOUS.`);
 
   if (opts["print-key"]) console.log(`\nDAYWALKER_SIGNING_KEY=${key.privateKeyPkcs8Base64}`);
 }
@@ -347,6 +371,50 @@ async function check(opts: Record<string, string | boolean>) {
   process.exit(1);
 }
 
+/** Domain, API key and auth URL for the key commands, from flags, .env.local or the environment. */
+async function keyCommandContext(opts: Record<string, string | boolean>) {
+  const existing = readEnvFile(path.join(process.cwd(), ".env.local"));
+  const apiKey = await resolveApiKey(opts, existing);
+  if (!apiKey) fail("Set DAYWALKER_API_KEY (or pipe it to --api-key-stdin)");
+  const rawDomain = String(opts.domain ?? existing.get("DAYWALKER_DOMAIN") ?? process.env.DAYWALKER_DOMAIN ?? "");
+  const domain = publicHostname(rawDomain);
+  const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
+  const currentKid = existing.get("DAYWALKER_KEY_ID") ?? process.env.DAYWALKER_KEY_ID ?? null;
+  const previous = existing.get("DAYWALKER_SIGNING_KEY_PREVIOUS") ?? process.env.DAYWALKER_SIGNING_KEY_PREVIOUS;
+  const previousKid = previous ? ((await loadSigningKey(previous).catch(() => null))?.publicJwk.kid ?? null) : null;
+  return { apiKey, domain, rawDomain, authUrl, currentKid, previousKid };
+}
+
+async function keys(opts: Record<string, string | boolean>) {
+  const ctx = await keyCommandContext(opts);
+  if (!ctx.domain) fail(`--domain (${ctx.rawDomain || "not set"}) must be a public hostname (or set DAYWALKER_DOMAIN)`);
+  const result = await listSigningKeys({ authUrl: ctx.authUrl, apiKey: ctx.apiKey, domain: ctx.domain });
+  if (!result.ok) fail(keyApiFailure("Listing keys", result));
+  const list = result.keys ?? [];
+  if (opts.json) {
+    console.log(JSON.stringify(list, null, 2));
+    return;
+  }
+  const when = (t: number | null) => (t === null ? "-" : new Date(t * 1000).toISOString().replace(/\.\d{3}Z$/, "Z"));
+  console.log(`Signing keys for ${ctx.domain} (${list.filter((k) => k.status !== "REVOKED").length} live of 20 allowed):`);
+  for (const k of list) {
+    const tag = k.keyId === ctx.currentKid ? " (current)" : k.keyId === ctx.previousKid ? " (previous)" : "";
+    console.log(`  ${k.keyId}${tag}  ${k.status}  slot=${k.instanceId ?? "-"}  expires=${when(k.expiresAt)}  lastUsed=${when(k.lastUsedAt)}`);
+  }
+}
+
+async function revoke(keyId: string | undefined, opts: Record<string, string | boolean>) {
+  if (!keyId) fail("Usage: daywalker revoke <keyId>");
+  const ctx = await keyCommandContext(opts);
+  if (keyId === ctx.currentKid && !opts.force) {
+    fail(`${keyId} is DAYWALKER_KEY_ID, the key this service signs with: revoking it stops this service from authenticating. Pass --force if that is what you want.`);
+  }
+  const result = await revokeSigningKey({ authUrl: ctx.authUrl, apiKey: ctx.apiKey, keyId });
+  if (!result.ok) fail(keyApiFailure(`Revoking ${keyId}`, result));
+  console.log(`✔ Revoked signing key ${keyId}; Daywalker ended the OAuth sessions it started.`);
+  if (keyId === ctx.previousKid) console.log("  You can now remove DAYWALKER_SIGNING_KEY_PREVIOUS from .env.local.");
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const parsedArgs = args(rest);
@@ -366,6 +434,10 @@ async function main() {
     await rotate(parsedArgs);
   } else if (cmd === "check") {
     await check(parsedArgs);
+  } else if (cmd === "keys") {
+    await keys(parsedArgs);
+  } else if (cmd === "revoke") {
+    await revoke(rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined, parsedArgs);
   } else {
     fail(`Unknown command "${cmd}". Run \`daywalker --help\` for usage.`);
   }
