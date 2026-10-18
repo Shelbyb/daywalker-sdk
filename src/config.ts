@@ -108,7 +108,6 @@ export function resolveConfig(options: DaywalkerConfig = {}): ResolvedConfig {
   const serviceSlugs = parseServiceSlugs(options.serviceSlugs ?? options.serviceSlug ?? env.DAYWALKER_SERVICE_SLUG);
   const serviceSlug = serviceSlugs[0] ?? null;
   if (!apiKey) problems.push("DAYWALKER_API_KEY is not set");
-  if (!serviceSlug) problems.push("DAYWALKER_SERVICE_SLUG is not set");
 
   const signingKey = options.signingKey ?? env.DAYWALKER_SIGNING_KEY ?? null;
   const previousSigningKey = options.previousSigningKey ?? env.DAYWALKER_SIGNING_KEY_PREVIOUS ?? null;

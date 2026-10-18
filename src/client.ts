@@ -14,8 +14,8 @@ import {
   DaywalkerError,
   DaywalkerRateLimitError,
   type DaywalkerConfig,
-  type IssueLeaseOptions,
-  type LeaseResponse,
+  type TokenSet,
+  type GetTokensOptions,
   type PublicJwk,
   type RateLimitWindow,
   type RetryOptions,
@@ -227,6 +227,8 @@ function malformedValidation(json: Record<string, unknown>, payloadData: Record<
 function cloneResult(result: ValidateResult): ValidateResult {
   return typeof structuredClone === "function" ? structuredClone(result) : (JSON.parse(JSON.stringify(result)) as ValidateResult);
 }
+
+const DEFAULT_ISSUER = "https://auth.daywalker.dev";
 
 export class Daywalker {
   private readonly _config: ResolvedConfig;
@@ -486,7 +488,7 @@ export class Daywalker {
         token,
         publicKey: this._config.daywalkerPublicKey,
         expectedServiceSlug: serviceSlug || undefined,
-        expectedIssuer: this._config.leaseIssuer ?? undefined,
+        expectedIssuer: this._config.leaseIssuer ?? DEFAULT_ISSUER,
       });
 
       if (jwtResult.valid && jwtResult.payload) {
@@ -562,10 +564,8 @@ export class Daywalker {
       message: redactSecrets(message),
     });
     try {
+      // No service slug is sent: the caller is identified by its credentials, not by naming a service
       const validateBody: Record<string, string> = { token };
-      if (serviceSlug) {
-        validateBody.serviceSlug = serviceSlug;
-      }
 
       const res = await this.fetch("/api/v1/tokens/validate", {
         method: "POST",
@@ -696,31 +696,92 @@ export class Daywalker {
     return result.data;
   }
 
-  /**
-   * Exchanges an RFC 9421 signed request for a short-lived EdDSA JWT lease (POST /api/v1/leases/issue).
-   * The lease lists every service slug the API key covers (`services`, also the JWT's `services` and `aud`
-   * claims), so one set of credentials serves all of them. Pass `{ services: [...] }` to narrow it.
-   */
-  public async issueLease(options?: number | IssueLeaseOptions): Promise<LeaseResponse> {
-    const opts: IssueLeaseOptions = typeof options === "number" ? { ttlSeconds: options } : (options ?? {});
-    const services = opts.services ? parseServiceSlugs(opts.services) : undefined;
-    if (opts.services && (!services || services.length === 0)) {
-      throw new DaywalkerAuthError("issueLease: services must list at least one service slug", 400, "INVALID_REQUEST");
-    }
-    const res = await this.fetch("/api/v1/leases/issue", {
-      method: "POST",
-      body: { ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}), ...(services ? { services } : {}) },
-    });
+  private _tokens: TokenSet | null = null;
+  private _tokenFlight: Promise<TokenSet> | null = null;
+
+  private async _tokenRequest(body: Record<string, unknown>): Promise<TokenSet> {
+    const res = await this.fetch("/api/v1/oauth/token", { method: "POST", body });
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (res.status !== 201 && res.status !== 200) {
-      throw new DaywalkerAuthError(redactSecrets(String(json.message || json.error || `Lease issue failed with HTTP ${res.status}`)), res.status, json.error as string | undefined);
+    if (res.status !== 200) {
+      throw new DaywalkerAuthError(
+        redactSecrets(String(json.message || json.error || `Token request failed with HTTP ${res.status}`)),
+        res.status,
+        (json.code as string | undefined) ?? (json.error as string | undefined)
+      );
     }
-    if (typeof json.lease !== "string") {
-      throw new DaywalkerAuthError("Daywalker Auth returned a malformed lease response (no lease)", res.status, "SERVICE_UNAVAILABLE");
+    if (typeof json.access_token !== "string" || typeof json.refresh_token !== "string") {
+      throw new DaywalkerAuthError("Daywalker Auth returned a malformed token response", res.status, "SERVICE_UNAVAILABLE");
     }
-    // Servers from before multi-service tokens don't list services; their lease covers the one configured slug.
-    const listed = Array.isArray(json.services) ? json.services.filter((s): s is string => typeof s === "string") : [];
-    return { ...json, lease: json.lease, services: listed.length > 0 ? listed : this._config.serviceSlug ? [this._config.serviceSlug] : [] } as LeaseResponse;
+    const services = Array.isArray(json.services) ? json.services.filter((x): x is string => typeof x === "string") : [];
+    return {
+      accessToken: json.access_token,
+      refreshToken: json.refresh_token,
+      tokenType: String(json.token_type ?? "Bearer"),
+      expiresAt: Number(json.expires_at) || Math.floor(Date.now() / 1000) + Number(json.expires_in ?? 0),
+      expiresIn: Number(json.expires_in ?? 0),
+      refreshExpiresIn: Number(json.refresh_expires_in ?? 0),
+      scope: String(json.scope ?? services.join(" ")),
+      services,
+      jwksUri: typeof json.jwks_uri === "string" ? json.jwks_uri : undefined,
+    };
+  }
+
+  /**
+   * Client credentials grant (RFC 6749 §4.4): the signed request (API key + registered Ed25519 key) is
+   * exchanged for a short-lived access token JWT listing every service the credentials cover, and a
+   * rotating refresh token. No service slug is sent. The tokens are remembered for `accessToken()`.
+   */
+  public async getTokens(options: GetTokensOptions = {}): Promise<TokenSet> {
+    const scope = options.scope ? parseServiceSlugs(options.scope) : undefined;
+    if (options.scope && (!scope || scope.length === 0)) {
+      throw new DaywalkerAuthError("getTokens: scope must list at least one service slug", 400, "INVALID_REQUEST");
+    }
+    const tokens = await this._tokenRequest({
+      grant_type: "client_credentials",
+      ...(scope ? { scope: scope.join(" ") } : {}),
+      ...(options.expiresIn ? { expires_in: options.expiresIn } : {}),
+    });
+    this._tokens = tokens;
+    return tokens;
+  }
+
+  /**
+   * Refresh token rotation: trades the refresh token for a NEW access token and a NEW refresh token; the
+   * old refresh token stops working. Presenting an old one again revokes the whole session, so refreshes
+   * are serialized per client and the new refresh token must replace the stored one.
+   */
+  public async refreshTokens(refreshToken?: string): Promise<TokenSet> {
+    const token = refreshToken ?? this._tokens?.refreshToken;
+    if (!token) throw new DaywalkerAuthError("refreshTokens: no refresh token (call getTokens() first)", 400, "INVALID_REQUEST");
+    const tokens = await this._tokenRequest({ grant_type: "refresh_token", refresh_token: token });
+    this._tokens = tokens;
+    return tokens;
+  }
+
+  /**
+   * A valid access token, refreshing (or re-authenticating with the client credentials once the session
+   * ended) when it is within 30 seconds of expiry. Concurrent callers share one request, so the single-use
+   * refresh token is never presented twice.
+   */
+  public async accessToken(): Promise<string> {
+    const current = this._tokens;
+    if (current && current.expiresAt - 30 > Math.floor(Date.now() / 1000)) return current.accessToken;
+    if (!this._tokenFlight) {
+      this._tokenFlight = (async () => {
+        if (current) {
+          try {
+            return await this.refreshTokens();
+          } catch (err) {
+            if (!(err instanceof DaywalkerAuthError) || err.status !== 400) throw err;
+            // invalid_grant: the session ended or was revoked; start a new one
+          }
+        }
+        return this.getTokens();
+      })().finally(() => {
+        this._tokenFlight = null;
+      });
+    }
+    return (await this._tokenFlight).accessToken;
   }
 
   /**

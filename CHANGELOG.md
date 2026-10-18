@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+**Client credentials flow with rotating refresh tokens. Needs Daywalker Auth with `POST /api/v1/oauth/token`; breaking for `issueLease()` users.**
+- New `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()` and `client.accessToken()` (auto-refresh, serialized, falls back to the client credentials when the session ended). **`issueLease()` is removed** (`/api/v1/leases/issue` no longer exists).
+- No request carries a service slug any more: `validateToken()` stops sending `serviceSlug`, `DAYWALKER_SERVICE_SLUG` is optional (offline audience check only), and `init` / `rotate` no longer require `--service` or send a slug when registering a key.
+- `verifyJwtLease()` is stricter: requires `jti`, accepts `typ` `JWT` or `at+jwt` (never `rt+jwt`), caps clock skew at 30 s (was 60 s), and the client checks `iss` against `https://auth.daywalker.dev` unless `leaseIssuer` is set.
+- New `buildTokenCookie`, `clearTokenCookie`, `daywalkerCookies` (HttpOnly, Secure, SameSite=Strict/Lax cookies) and `accessTokenUser(payload)` for the verified `user` claim (UUID v7 `id`, `name`, `email`).
+
 ## 0.5.0
 **One API key, several services.** Needs Daywalker Auth with multi-service tokens; the SDK also works unchanged against older servers.
 - `client.issueLease()` returns `services`, every service slug the JWT lease covers (its `services` and `aud` claims). It takes `{ ttlSeconds?, services? }` (a bare number still works); `services` narrows the lease, and a service the key doesn't cover is refused with `403 SERVICE_NOT_GRANTED`.
