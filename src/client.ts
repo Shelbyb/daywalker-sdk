@@ -10,6 +10,8 @@ import {
   sha256Base64Url,
   generateDpopKey,
   createDpopProof,
+  base64UrlToBytes,
+  utf8ToString,
   type DpopKey,
 } from "./crypto/index.js";
 import {
@@ -204,6 +206,40 @@ function redirectError(what: string, res: Response): DaywalkerError {
   );
 }
 
+/**
+ * A failed client credentials grant or refresh as a validation result. Missing configuration is a 500;
+ * anything else (invalid_client, access_denied, an outage) is a 503, since it says nothing about the
+ * caller's token. Never cached.
+ */
+function credentialFailure(err: DaywalkerAuthError): ValidateResult {
+  if (err.code === "CONFIGURATION_ERROR") {
+    return { ok: false, error: "CONFIGURATION_ERROR", status: 500, message: err.message };
+  }
+  return {
+    ok: false,
+    error: "SERVICE_UNAVAILABLE",
+    status: 503,
+    message: redactSecrets(`Could not obtain an OAuth access token${err.code ? ` (${err.code})` : ""}: ${err.message}`),
+  };
+}
+
+/** The payload of a JWT this client was just issued over TLS; not verified, only read. */
+function decodeJwtClaims(jwt: string): Record<string, unknown> {
+  try {
+    const claims = JSON.parse(utf8ToString(base64UrlToBytes(jwt.split(".")[1] ?? "")));
+    return claims && typeof claims === "object" ? claims : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The `code` (else `error`) of a JSON error answer, read from a copy so the caller still gets the body. */
+async function errorCode(res: Response): Promise<string | undefined> {
+  const json = (await res.clone().json().catch(() => null)) as Record<string, unknown> | null;
+  const code = json?.code ?? json?.error;
+  return typeof code === "string" ? code : undefined;
+}
+
 function isRateLimitWindow(value: unknown): value is RateLimitWindow {
   if (!value || typeof value !== "object") return false;
   const w = value as Record<string, unknown>;
@@ -232,6 +268,7 @@ function cloneResult(result: ValidateResult): ValidateResult {
 }
 
 const DEFAULT_ISSUER = "https://auth.daywalker.dev";
+const TOKEN_PATH = "/api/v1/oauth/token";
 
 export class Daywalker {
   private readonly _config: ResolvedConfig;
@@ -303,8 +340,11 @@ export class Daywalker {
    * - 429s are retried with exponential backoff, honoring `Retry-After` up to `retry.maxRetryAfterMs`. Network
    *   errors and timeouts are retried only for GET / HEAD / OPTIONS, with an `idempotencyKey`, or when
    *   `retry.retryNetworkErrors` is true. Options merge as defaults < `config.retry` < `init.retry`.
-   * - An explicit `Authorization` header is sent as given; otherwise `Bearer <apiKey>` is added. The signature
-   *   covers method, path, query, authority and Content-Digest, never Authorization.
+   * - An explicit `Authorization` header is sent as given; otherwise `DPoP <access token>` from the OAuth
+   *   client credentials flow (`accessToken()`) is added, with a DPoP proof bound to it. The API key is never
+   *   sent here: it only authenticates the client credentials grant. An answer of 401 ACCESS_TOKEN_EXPIRED
+   *   refreshes the token and retries once. The signature covers method, path, query, authority and
+   *   Content-Digest, never Authorization.
    */
   public async fetch(
     path: string,
@@ -312,7 +352,7 @@ export class Daywalker {
   ): Promise<Response> {
     const authUrl = this._config.authUrl;
     const url = new URL(path, authUrl);
-    // Absolute URLs to other hosts would otherwise receive the API key and a valid signature.
+    // Absolute URLs to other hosts would otherwise receive an access token and a valid signature.
     const authOrigin = new URL(authUrl).origin;
     if (url.origin !== authOrigin) {
       throw new DaywalkerError(`Refusing to send Daywalker credentials to ${url.origin}; fetch() only targets ${authOrigin}`);
@@ -342,6 +382,10 @@ export class Daywalker {
     callerSignal?.throwIfAborted();
     const signingKey = await this.getLoadedSigningKey();
     const body = await prepareBody(rawBody, Boolean(signingKey));
+    // The token endpoint authenticates itself (see _tokenRequest); everything else gets an OAuth access token.
+    const isTokenEndpoint = url.pathname === TOKEN_PATH;
+    const autoAuth = !isTokenEndpoint && !new Headers(init?.headers).has("authorization");
+    let refreshedExpired = false;
 
     let attempt = 0;
     while (true) {
@@ -354,8 +398,8 @@ export class Daywalker {
       if (!headers.has("accept")) {
         headers.set("accept", "application/json");
       }
-      if (this._config.apiKey && !headers.has("authorization")) {
-        headers.set("authorization", `Bearer ${this._config.apiKey}`);
+      if (autoAuth) {
+        headers.set("authorization", `DPoP ${await this.accessToken()}`);
       }
       if (idempotencyKey && !headers.has("idempotency-key")) {
         headers.set("idempotency-key", idempotencyKey);
@@ -363,8 +407,7 @@ export class Daywalker {
       // DPoP (RFC 9449) is mandatory on the token endpoint and when presenting a DPoP access token.
       const auth = headers.get("authorization") ?? "";
       const isDpopAuth = /^dpop\s+/i.test(auth);
-      const isTokenEndpoint = url.pathname === "/api/v1/oauth/token";
-      if (!headers.has("dpop") && (isTokenEndpoint || isDpopAuth)) {
+      if ((autoAuth || !headers.has("dpop")) && (isTokenEndpoint || isDpopAuth)) {
         const accessToken = isDpopAuth ? auth.replace(/^dpop\s+/i, "") : undefined;
         headers.set("dpop", await createDpopProof(await this.getDpopKey(), { method, url: url.toString(), accessToken }));
       }
@@ -415,6 +458,14 @@ export class Daywalker {
 
       if (isRedirect(res)) {
         throw redirectError(url.pathname, res);
+      }
+
+      if (res.status === 401 && autoAuth && !refreshedExpired && body.replayable && (await errorCode(res)) === "ACCESS_TOKEN_EXPIRED") {
+        // The server's clock says the token expired before ours did: refresh it and try once more.
+        refreshedExpired = true;
+        if (this._tokens) this._tokens = { ...this._tokens, expiresAt: 0 };
+        res.body?.cancel().catch(() => {});
+        continue;
       }
 
       if (res.status === 429 && body.replayable && attempt < maxRetries) {
@@ -672,6 +723,8 @@ export class Daywalker {
         message: redactSecrets(errMsg || `Validation failed with HTTP ${res.status}`),
       });
     } catch (err) {
+      // This service couldn't get its own access token: says nothing about the caller's token.
+      if (err instanceof DaywalkerAuthError) return credentialFailure(err);
       return {
         ok: false,
         error: "NETWORK_ERROR",
@@ -682,19 +735,53 @@ export class Daywalker {
   }
 
   /**
-   * Service health check: validates this service's own configured API key (DAYWALKER_API_KEY).
-   * Never use this to authenticate an incoming request.
+   * Service health check: runs this service's OAuth client credentials flow (`accessToken()`) and checks
+   * that the granted services include `serviceSlug` (default: the configured one). Never use this to
+   * authenticate an incoming request. `forceRefresh` starts a new client credentials grant.
    */
-  public async validateServiceKey(options?: { serviceSlug?: string; forceRefresh?: boolean }): Promise<ValidateResult> {
-    if (!this._config.apiKey) {
+  public async validateServiceCredentials(options?: { serviceSlug?: string; forceRefresh?: boolean }): Promise<ValidateResult> {
+    const serviceSlug = (options?.serviceSlug ?? this._config.serviceSlug ?? "").toLowerCase();
+    let tokens: TokenSet;
+    try {
+      if (options?.forceRefresh) await this.getTokens();
+      else await this.accessToken();
+      tokens = this._tokens!;
+    } catch (err) {
+      if (err instanceof DaywalkerAuthError) return credentialFailure(err);
       return {
         ok: false,
-        error: "CONFIGURATION_ERROR",
-        status: 500,
-        message: "DAYWALKER_API_KEY is not set",
+        error: "NETWORK_ERROR",
+        status: 503,
+        message: redactSecrets(`Could not reach Daywalker Auth: ${(err as Error).message}`),
       };
     }
-    return this.validateToken(this._config.apiKey, options);
+    if (serviceSlug && tokens.services.length > 0 && !tokens.services.includes(serviceSlug)) {
+      return {
+        ok: false,
+        error: "SERVICE_NOT_GRANTED",
+        status: 403,
+        message: `The OAuth client credentials don't cover ${serviceSlug} (granted: ${tokens.services.join(", ")})`,
+      };
+    }
+    const claims = decodeJwtClaims(tokens.accessToken);
+    const user = claims.user && typeof claims.user === "object" ? (claims.user as Record<string, unknown>) : {};
+    const userId = typeof user.id === "string" ? user.id : typeof claims.sub === "string" ? claims.sub : undefined;
+    return {
+      ok: true,
+      data: {
+        serviceSlug: serviceSlug || tokens.services[0] || "",
+        tenantId: userId ?? "",
+        userId,
+        rateLimit: { limit: 0, remaining: 0, reset: 0 },
+        services: tokens.services,
+        expiresAt: tokens.expiresAt,
+      },
+    };
+  }
+
+  /** @deprecated Renamed to `validateServiceCredentials()`; the API key itself is no longer validated. */
+  public async validateServiceKey(options?: { serviceSlug?: string; forceRefresh?: boolean }): Promise<ValidateResult> {
+    return this.validateServiceCredentials(options);
   }
 
   /**
@@ -717,8 +804,20 @@ export class Daywalker {
   private _tokens: TokenSet | null = null;
   private _tokenFlight: Promise<TokenSet> | null = null;
 
+  /**
+   * POST /api/v1/oauth/token. The client credentials grant is the one request that carries the API key
+   * (`Authorization: Bearer`, next to the RFC 9421 signature); a refresh is authenticated by its refresh
+   * token and DPoP proof alone.
+   */
   private async _tokenRequest(body: Record<string, unknown>): Promise<TokenSet> {
-    const res = await this.fetch("/api/v1/oauth/token", { method: "POST", body });
+    const headers: Record<string, string> = {};
+    if (body.grant_type === "client_credentials") {
+      if (!this._config.apiKey) {
+        throw new DaywalkerAuthError("DAYWALKER_API_KEY is not set: it is the client credential for the OAuth token endpoint", 500, "CONFIGURATION_ERROR");
+      }
+      headers.authorization = `Bearer ${this._config.apiKey}`;
+    }
+    const res = await this.fetch(TOKEN_PATH, { method: "POST", body, headers });
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (res.status !== 200) {
       throw new DaywalkerAuthError(

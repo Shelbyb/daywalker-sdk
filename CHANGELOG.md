@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+**OAuth access tokens instead of the API key.** Follows the Daywalker API docs: `POST /api/v1/tokens/validate` requires `Authorization: DPoP <access_token>`, and bearer API keys are refused with `401 DPOP_REQUIRED`.
+- **Breaking:** `client.fetch()` and `validateToken()` no longer send `Authorization: Bearer <apiKey>`. They send `Authorization: DPoP <access token>` with a DPoP proof, getting and refreshing the token through the client credentials flow (`accessToken()`) on demand. A `401 ACCESS_TOKEN_EXPIRED` refreshes the token and retries once.
+- `DAYWALKER_API_KEY` is now only the OAuth client credential: it is sent on the `client_credentials` grant (with the RFC 9421 signature) and by `daywalker init` / `rotate` to register the signing key, nowhere else. The `refresh_token` grant no longer sends it.
+- A failed client credentials grant makes `validateToken()` return `503 SERVICE_UNAVAILABLE` (never a `401` for the caller's token); a missing `DAYWALKER_API_KEY` is `500 CONFIGURATION_ERROR`.
+- New `client.validateServiceCredentials()`: the service health check now runs the client credentials grant and checks the granted services instead of validating the API key as a token (`403 SERVICE_NOT_GRANTED` when the configured service isn't covered). `validateServiceKey()` is a deprecated alias, and `createDaywalkerServiceHealthMiddleware` uses the new check.
+
 ## 0.6.0
 **Client credentials flow with rotating refresh tokens. Needs Daywalker Auth with `POST /api/v1/oauth/token`; breaking for `issueLease()` users.**
 - New `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()` and `client.accessToken()` (auto-refresh, serialized, falls back to the client credentials when the session ended). **`issueLease()` is removed** (`/api/v1/leases/issue` no longer exists).

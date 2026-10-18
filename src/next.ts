@@ -200,13 +200,14 @@ export function createDaywalkerMiddleware(options: NextMiddlewareOptions = {}) {
 }
 
 /**
- * Service health gate: checks this service's own DAYWALKER_API_KEY (not the caller's token) and
- * routes every request to `errorPath` while it is invalid, redirecting back once it heals.
+ * Service health gate: checks that this service's OAuth client credentials still get an access token
+ * covering its service (not the caller's token) and routes every request to `errorPath` while they don't,
+ * redirecting back once it heals.
  * It does NOT authenticate callers; use `createDaywalkerMiddleware` or `withDaywalkerAuth` for that.
  */
 export function createDaywalkerServiceHealthMiddleware(options: NextMiddlewareOptions = {}) {
   const client = options.client ?? daywalker;
-  return buildMiddleware(options, () => client.validateServiceKey({ serviceSlug: options.serviceSlug }));
+  return buildMiddleware(options, () => client.validateServiceCredentials({ serviceSlug: options.serviceSlug }));
 }
 
 function buildMiddleware(options: NextMiddlewareOptions, authenticate: (request: Request) => Promise<ValidateResult>) {
