@@ -298,7 +298,7 @@ Tokens must have a numeric `exp`, a `jti`, and an `aud` (or `serviceSlug`) conta
 |---|---|---|
 | `POST /api/v1/tokens/validate` | `client.validateToken()` | Body `{ token, serviceSlug }`; signed with `Signature-Input`, `Signature`, `Content-Digest`. Errors: `400` (`DIGEST_MISMATCH`/missing fields), `401` (`INVALID_SIGNATURE`/invalid token), `403`, `429`. Response includes `valid`, `tokenId`, `tokenName`, `userId`, `stage`, `rateLimit`, `rateLimitHourly` and `X-RateLimit-*` / `X-RateLimit-Hourly-*` headers |
 | `POST /api/v1/keys/register` | `npx daywalker init` / `rotate` | Bearer auth; body `{ keyId, domain, publicKey, serviceSlug? }`; `403 service_not_covered` if the key doesn't cover `serviceSlug` |
-| `POST /api/v1/oauth/token` | `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()`, `client.accessToken()` | `client_credentials` (signed request) and `refresh_token` grants return `{ accessToken, refreshToken, expiresAt, services, … }`; refresh tokens rotate and reuse revokes the session |
+| `POST /api/v1/oauth/token` | `client.getTokens({ scope?, expiresIn? })`, `client.refreshTokens()`, `client.accessToken()` | `client_credentials` (signed request with mandatory DPoP) and `refresh_token` grants return `{ accessToken, refreshToken, expiresAt, services, … }`; tokens are sender-constrained via DPoP (RFC 9449), refresh tokens rotate, and reuse revokes the session |
 | `GET /.well-known/jwks.json` | `client.fetchJwks()` | Daywalker public JWKS for offline lease verification |
 
 Inbound tokens may be supplied as `x-api-token: srv_live_...` or `Authorization: Bearer <JWT or API key>`.
