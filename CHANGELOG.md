@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+**One API key, several services.** Needs Daywalker Auth with multi-service tokens; the SDK also works unchanged against older servers.
+- `client.issueLease()` returns `services`, every service slug the JWT lease covers (its `services` and `aud` claims). It takes `{ ttlSeconds?, services? }` (a bare number still works); `services` narrows the lease, and a service the key doesn't cover is refused with `403 SERVICE_NOT_GRANTED`.
+- `validateToken()` reports `data.services`: the services an offline-verified lease covers, or the ones an online-validated token covers (just the validated slug against older servers).
+- `verifyJwtLease()` also requires the expected service to be in the lease's `services` claim when it has one. New `leaseServices(payload)` helper.
+- `DAYWALKER_SERVICE_SLUG` / `serviceSlug` accept a comma-separated list (`gigpulse,devpulse`); the first is the default. `serviceSlugs` option, `config.serviceSlugs`, `selfCheck().serviceSlugs`, `parseServiceSlugs()`.
+- `daywalker init` / `rotate` take `--service gigpulse,devpulse` and send `serviceSlug` when registering the key, so a key for a service the API key doesn't cover fails immediately with `service_not_covered`.
 - package.json: the description no longer says "zero-dependency" (`re2js` has been a runtime dependency since 0.4.0).
 - Internal maintenance notes in `docs/maintenance/` are excluded from the published package.
 

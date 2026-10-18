@@ -1,9 +1,10 @@
-import { resolveConfig, type ResolvedConfig } from "./config.js";
+import { parseServiceSlugs, resolveConfig, type ResolvedConfig } from "./config.js";
 import {
   loadSigningKey,
   loadPublicKey,
   signRequest,
   verifyJwtLease,
+  leaseServices,
   maskSecret,
   redactSecrets,
   sha256Base64Url,
@@ -13,6 +14,8 @@ import {
   DaywalkerError,
   DaywalkerRateLimitError,
   type DaywalkerConfig,
+  type IssueLeaseOptions,
+  type LeaseResponse,
   type PublicJwk,
   type RateLimitWindow,
   type RetryOptions,
@@ -209,6 +212,9 @@ function malformedValidation(json: Record<string, unknown>, payloadData: Record<
   for (const src of [json, payloadData]) {
     for (const k of ["serviceSlug", "tenantId", "tokenId", "tokenName", "userId", "stage"]) {
       if (src[k] !== undefined && src[k] !== null && typeof src[k] !== "string") return `${k} is not a string`;
+    }
+    if (src.services !== undefined && src.services !== null && !(Array.isArray(src.services) && src.services.every((s) => typeof s === "string"))) {
+      return "services is not a list of strings";
     }
     for (const k of ["rateLimit", "rateLimitHourly"]) {
       if (src[k] !== undefined && src[k] !== null && !isRateLimitWindow(src[k])) return `${k} is not a rate limit window`;
@@ -488,7 +494,7 @@ export class Daywalker {
         const result: ValidateResult = {
           ok: true,
           data: {
-            serviceSlug: serviceSlug || ((payload.serviceSlug || payload.aud || "") as string),
+            serviceSlug: serviceSlug || ((payload.serviceSlug || payload.service || "") as string),
             tenantId: (payload.tenantId || payload.sub || "") as string,
             rateLimit: (payload.rateLimit as RateLimitWindow) ?? {
               limit: 1000,
@@ -502,6 +508,8 @@ export class Daywalker {
             stage: payload.stage as string | undefined,
             offlineVerified: true,
             ...payload,
+            // Every service the lease covers: its `services` claim, else its audience.
+            services: leaseServices(payload),
           },
         };
 
@@ -611,6 +619,7 @@ export class Daywalker {
           userId: (payloadData.userId || json.userId) as string | undefined,
           stage: (payloadData.stage || json.stage) as string | undefined,
           ...payloadData,
+          services: ((payloadData.services ?? json.services) as string[] | undefined) ?? [(json.serviceSlug as string) || serviceSlug],
         };
 
         const result: ValidateResult = {
@@ -689,17 +698,29 @@ export class Daywalker {
 
   /**
    * Exchanges an RFC 9421 signed request for a short-lived EdDSA JWT lease (POST /api/v1/leases/issue).
+   * The lease lists every service slug the API key covers (`services`, also the JWT's `services` and `aud`
+   * claims), so one set of credentials serves all of them. Pass `{ services: [...] }` to narrow it.
    */
-  public async issueLease(ttlSeconds?: number): Promise<{ lease: string; tokenType?: string; expiresAt?: string; jwksUri?: string }> {
+  public async issueLease(options?: number | IssueLeaseOptions): Promise<LeaseResponse> {
+    const opts: IssueLeaseOptions = typeof options === "number" ? { ttlSeconds: options } : (options ?? {});
+    const services = opts.services ? parseServiceSlugs(opts.services) : undefined;
+    if (opts.services && (!services || services.length === 0)) {
+      throw new DaywalkerAuthError("issueLease: services must list at least one service slug", 400, "INVALID_REQUEST");
+    }
     const res = await this.fetch("/api/v1/leases/issue", {
       method: "POST",
-      body: ttlSeconds ? { ttlSeconds } : {},
+      body: { ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}), ...(services ? { services } : {}) },
     });
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
     if (res.status !== 201 && res.status !== 200) {
       throw new DaywalkerAuthError(redactSecrets(String(json.message || json.error || `Lease issue failed with HTTP ${res.status}`)), res.status, json.error as string | undefined);
     }
-    return json as { lease: string; tokenType?: string; expiresAt?: string; jwksUri?: string };
+    if (typeof json.lease !== "string") {
+      throw new DaywalkerAuthError("Daywalker Auth returned a malformed lease response (no lease)", res.status, "SERVICE_UNAVAILABLE");
+    }
+    // Servers from before multi-service tokens don't list services; their lease covers the one configured slug.
+    const listed = Array.isArray(json.services) ? json.services.filter((s): s is string => typeof s === "string") : [];
+    return { ...json, lease: json.lease, services: listed.length > 0 ? listed : this._config.serviceSlug ? [this._config.serviceSlug] : [] } as LeaseResponse;
   }
 
   /**
@@ -771,6 +792,7 @@ export class Daywalker {
     return {
       ok: problems.length === 0,
       serviceSlug: this._config.serviceSlug,
+      serviceSlugs: this._config.serviceSlugs,
       domain: this._config.domain,
       signing: Boolean(signingKey),
       keyId,

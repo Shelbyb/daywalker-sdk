@@ -15,6 +15,11 @@ export interface TokenPayload {
   tokenName?: string;
   userId?: string;
   stage?: string;
+  /**
+   * Every service slug the token (or JWT lease) covers. One API key can cover several services, so this
+   * can hold more than `serviceSlug`, which is the service this call validated for.
+   */
+  services?: string[];
   offlineVerified?: boolean;
   [key: string]: unknown;
 }
@@ -97,7 +102,13 @@ export interface DaywalkerConfig {
    */
   previousSigningKey?: string | SigningKey;
   keyId?: string;
+  /**
+   * The service this deployment validates tokens for (env DAYWALKER_SERVICE_SLUG). One API key can cover
+   * several services: a comma-separated list ("gigpulse,devpulse") is accepted, and the first is the default.
+   */
   serviceSlug?: string;
+  /** Same as a comma-separated `serviceSlug`, as an array. Takes precedence over `serviceSlug`. */
+  serviceSlugs?: string[];
   domain?: string;
   /** A JWK, a JWKS (`{ keys: [...] }`, selected by the lease's `kid`), PEM, or Base64 SPKI / raw key. */
   daywalkerPublicKey?: string | PublicJwk | PublicJwks;
@@ -120,9 +131,32 @@ export interface DaywalkerConfig {
   env?: Record<string, string | undefined>;
 }
 
+/** Response of `client.issueLease()` (POST /api/v1/leases/issue). */
+export interface LeaseResponse {
+  /** The signed EdDSA JWT. Verify it with Daywalker's public JWKS. */
+  lease: string;
+  tokenType?: string;
+  /** Unix seconds. */
+  expiresAt?: number | string;
+  jwksUri?: string;
+  /** Every service slug the lease covers (also its `services` and `aud` claims). */
+  services: string[];
+}
+
+export interface IssueLeaseOptions {
+  /** Lease lifetime in seconds (Daywalker clamps it to 1h-24h). */
+  ttlSeconds?: number;
+  /**
+   * Narrow the lease to these service slugs (least privilege). Each must be one the API key covers;
+   * otherwise Daywalker answers 403 `SERVICE_NOT_GRANTED`. Default: every service the key covers.
+   */
+  services?: string[];
+}
+
 export interface SelfCheckResult {
   ok: boolean;
   serviceSlug: string | null;
+  serviceSlugs: string[];
   domain: string | null;
   signing: boolean;
   keyId: string | null;

@@ -25,6 +25,8 @@ export type {
   ValidateResult,
   RetryOptions,
   SelfCheckResult,
+  LeaseResponse,
+  IssueLeaseOptions,
   PublicJwk,
   PublicJwks,
   SigningKey,
@@ -32,6 +34,7 @@ export type {
 
 export {
   resolveConfig,
+  parseServiceSlugs,
   publicHostname,
   assertSecureUrl,
   DEFAULT_TIMEOUT_MS,
@@ -60,6 +63,7 @@ export {
   signRequest,
   verifyRequestSignature,
   verifyJwtLease,
+  leaseServices,
   registerPublicKey,
   stringToUtf8,
   utf8ToString,
