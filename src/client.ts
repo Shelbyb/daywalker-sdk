@@ -8,6 +8,9 @@ import {
   maskSecret,
   redactSecrets,
   sha256Base64Url,
+  generateDpopKey,
+  createDpopProof,
+  type DpopKey,
 } from "./crypto/index.js";
 import {
   DaywalkerAuthError,
@@ -275,6 +278,13 @@ export class Daywalker {
     return this._signingKeyPromise;
   }
 
+  private _dpopKey: Promise<DpopKey> | null = null;
+
+  /** The client's DPoP key, generated on first use. Issued tokens are bound to it for this client's life. */
+  private getDpopKey(): Promise<DpopKey> {
+    return (this._dpopKey ??= generateDpopKey());
+  }
+
   private async getLoadedPreviousSigningKey(): Promise<SigningKey | null> {
     const raw = this._config.previousSigningKey;
     if (!raw) return null;
@@ -349,6 +359,14 @@ export class Daywalker {
       }
       if (idempotencyKey && !headers.has("idempotency-key")) {
         headers.set("idempotency-key", idempotencyKey);
+      }
+      // DPoP (RFC 9449) is mandatory on the token endpoint and when presenting a DPoP access token.
+      const auth = headers.get("authorization") ?? "";
+      const isDpopAuth = /^dpop\s+/i.test(auth);
+      const isTokenEndpoint = url.pathname === "/api/v1/oauth/token";
+      if (!headers.has("dpop") && (isTokenEndpoint || isDpopAuth)) {
+        const accessToken = isDpopAuth ? auth.replace(/^dpop\s+/i, "") : undefined;
+        headers.set("dpop", await createDpopProof(await this.getDpopKey(), { method, url: url.toString(), accessToken }));
       }
 
       if (signingKey) {
@@ -716,7 +734,7 @@ export class Daywalker {
     return {
       accessToken: json.access_token,
       refreshToken: json.refresh_token,
-      tokenType: String(json.token_type ?? "Bearer"),
+      tokenType: String(json.token_type ?? "DPoP"),
       expiresAt: Number(json.expires_at) || Math.floor(Date.now() / 1000) + Number(json.expires_in ?? 0),
       expiresIn: Number(json.expires_in ?? 0),
       refreshExpiresIn: Number(json.refresh_expires_in ?? 0),

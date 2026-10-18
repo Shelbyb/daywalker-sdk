@@ -51,3 +51,6 @@ export type {
   VerifySignatureResult,
   ReplayStore,
 } from "./signatures.js";
+
+export { generateDpopKey, createDpopProof } from "./dpop.js";
+export type { DpopKey } from "./dpop.js";
