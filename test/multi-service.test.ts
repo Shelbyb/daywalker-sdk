@@ -31,6 +31,7 @@ function lease(overrides: Record<string, unknown> = {}) {
     services: ["gigpulse", "devpulse"],
     service: "gigpulse",
     domain: "gigpulse.daywalker.dev",
+    jti: "jti-1",
     exp: now() + 3600,
     ...overrides,
   };
@@ -64,7 +65,8 @@ describe("service slug lists", () => {
     const none = resolveConfig({ env: {} });
     assert.strictEqual(none.serviceSlug, null);
     assert.deepStrictEqual(none.serviceSlugs, []);
-    assert.ok(none.problems.some((p) => p.includes("DAYWALKER_SERVICE_SLUG")));
+    // the slug is optional: requests never name a service
+    assert.ok(!none.problems.some((p) => p.includes("DAYWALKER_SERVICE_SLUG")));
   });
 });
 
@@ -150,52 +152,87 @@ describe("online validation of a multi-service token", () => {
   });
 });
 
-describe("client.issueLease", () => {
-  const make = async (respond: (body: any) => Response, sent: any[] = []) =>
+describe("client credentials tokens", () => {
+  const tokenBody = (n: number, extra: Record<string, unknown> = {}) => ({
+    access_token: `access-${n}`,
+    refresh_token: `refresh-${n}`,
+    token_type: "Bearer",
+    expires_in: 900,
+    expires_at: Math.floor(Date.now() / 1000) + 900,
+    refresh_expires_in: 2592000,
+    scope: "gigpulse devpulse",
+    services: ["gigpulse", "devpulse"],
+    ...extra,
+  });
+
+  const make = async (respond: (body: any, n: number) => Response, sent: any[] = []) =>
     new Daywalker({
       apiKey: "srv_live_k",
-      serviceSlug: "gigpulse",
       signingKey: (await generateSigningKey()).privateKeyPkcs8Base64,
       fetch: async (_url, init) => {
         const body = JSON.parse(String(init?.body ?? "{}"));
         sent.push(body);
-        return respond(body);
+        return respond(body, sent.length);
       },
     });
 
-  it("returns the services the lease covers", async () => {
+  it("getTokens sends no service slug and returns every service", async () => {
     const sent: any[] = [];
-    const client = await make(() => Response.json({ lease: "a.b.c", tokenType: "JWT", expiresAt: 1, services: ["gigpulse", "devpulse"] }, { status: 201 }), sent);
-    const res = await client.issueLease();
+    const client = await make((_b, n) => Response.json(tokenBody(n)), sent);
+    const res = await client.getTokens();
+    assert.deepStrictEqual(sent[0], { grant_type: "client_credentials" });
     assert.deepStrictEqual(res.services, ["gigpulse", "devpulse"]);
-    assert.strictEqual(res.lease, "a.b.c");
-    assert.deepStrictEqual(sent[0], {});
+    assert.strictEqual(res.accessToken, "access-1");
+    assert.strictEqual(res.refreshToken, "refresh-1");
   });
 
-  it("accepts a ttl number (as before) or options, and narrows with services", async () => {
+  it("narrows with scope and expiresIn, and refuses an empty scope locally", async () => {
     const sent: any[] = [];
-    const client = await make((b) => Response.json({ lease: "a.b.c", services: b.services ?? ["gigpulse", "devpulse"] }, { status: 201 }), sent);
-    await client.issueLease(7200);
-    const narrowed = await client.issueLease({ ttlSeconds: 3600, services: ["DevPulse", "devpulse"] });
-    assert.deepStrictEqual(sent[0], { ttlSeconds: 7200 });
-    assert.deepStrictEqual(sent[1], { ttlSeconds: 3600, services: ["devpulse"] });
-    assert.deepStrictEqual(narrowed.services, ["devpulse"]);
+    const client = await make((_b, n) => Response.json(tokenBody(n, { services: ["devpulse"] })), sent);
+    await client.getTokens({ scope: ["DevPulse", "devpulse"], expiresIn: 600 });
+    assert.deepStrictEqual(sent[0], { grant_type: "client_credentials", scope: "devpulse", expires_in: 600 });
+    await assert.rejects(client.getTokens({ scope: [] }), (e: any) => e instanceof DaywalkerAuthError && e.status === 400);
   });
 
-  it("refuses an empty services list locally and surfaces SERVICE_NOT_GRANTED", async () => {
-    const client = await make(() => Response.json({ error: "SERVICE_NOT_GRANTED", message: "can't be used for: sonalyze" }, { status: 403 }));
-    await assert.rejects(client.issueLease({ services: [] }), (e: any) => e instanceof DaywalkerAuthError && e.status === 400);
-    await assert.rejects(
-      client.issueLease({ services: ["sonalyze"] }),
-      (e: any) => e instanceof DaywalkerAuthError && e.status === 403 && e.code === "SERVICE_NOT_GRANTED"
-    );
+  it("surfaces server errors with their code", async () => {
+    const client = await make(() => Response.json({ error: "invalid_scope", code: "SERVICE_NOT_GRANTED", message: "nope" }, { status: 403 }));
+    await assert.rejects(client.getTokens({ scope: ["sonalyze"] }), (e: any) => e.status === 403 && e.code === "SERVICE_NOT_GRANTED");
+    const broken = await make(() => Response.json({}, { status: 200 }));
+    await assert.rejects(broken.getTokens(), DaywalkerAuthError);
   });
 
-  it("falls back to the configured slug for servers that don't list services, and rejects a lease-less answer", async () => {
-    const old = await make(() => Response.json({ lease: "a.b.c" }, { status: 201 }));
-    assert.deepStrictEqual((await old.issueLease()).services, ["gigpulse"]);
-    const broken = await make(() => Response.json({}, { status: 201 }));
-    await assert.rejects(broken.issueLease(), DaywalkerAuthError);
+  it("refreshTokens rotates: sends the refresh token and stores the new pair", async () => {
+    const sent: any[] = [];
+    const client = await make((_b, n) => Response.json(tokenBody(n)), sent);
+    await client.getTokens();
+    const next = await client.refreshTokens();
+    assert.deepStrictEqual(sent[1], { grant_type: "refresh_token", refresh_token: "refresh-1" });
+    assert.strictEqual(next.refreshToken, "refresh-2");
+    await client.refreshTokens();
+    assert.strictEqual(sent[2].refresh_token, "refresh-2");
+  });
+
+  it("accessToken() reuses a fresh token, and refreshes once for concurrent callers when it is about to expire", async () => {
+    const sent: any[] = [];
+    const client = await make((_b, n) => Response.json(tokenBody(n, n === 1 ? { expires_at: Math.floor(Date.now() / 1000) + 5 } : {})), sent);
+    assert.strictEqual(await client.accessToken(), "access-1");
+    const [a, b] = await Promise.all([client.accessToken(), client.accessToken()]);
+    assert.strictEqual(a, "access-2");
+    assert.strictEqual(b, "access-2");
+    assert.strictEqual(sent.length, 2);
+    assert.strictEqual(await client.accessToken(), "access-2");
+    assert.strictEqual(sent.length, 2);
+  });
+
+  it("accessToken() starts a new session when the refresh token was rejected", async () => {
+    const sent: any[] = [];
+    const client = await make((b, n) => {
+      if (b.grant_type === "refresh_token") return Response.json({ error: "invalid_grant", message: "revoked" }, { status: 400 });
+      return Response.json(tokenBody(n, n === 1 ? { expires_at: 1 } : {}));
+    }, sent);
+    await client.getTokens();
+    assert.strictEqual(await client.accessToken(), "access-3");
+    assert.deepStrictEqual(sent.map((s) => s.grant_type), ["client_credentials", "refresh_token", "client_credentials"]);
   });
 });
 
@@ -263,7 +300,7 @@ describe("CLI init with several services", () => {
         DAYWALKER_API_KEY: "srv_live_multi",
       });
       assert.strictEqual(res.status, 0, res.stderr);
-      assert.strictEqual(bodies.at(-1).serviceSlug, "gigpulse,devpulse");
+      assert.strictEqual(bodies.at(-1).serviceSlug, undefined);
       assert.match(fs.readFileSync(path.join(dir, ".env.local"), "utf8"), /^DAYWALKER_SERVICE_SLUG="gigpulse,devpulse"$/m);
 
       const check = await run(dir, ["check"], { DAYWALKER_API_KEY: "srv_live_multi" });

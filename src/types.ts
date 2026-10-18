@@ -131,26 +131,37 @@ export interface DaywalkerConfig {
   env?: Record<string, string | undefined>;
 }
 
-/** Response of `client.issueLease()` (POST /api/v1/leases/issue). */
-export interface LeaseResponse {
-  /** The signed EdDSA JWT. Verify it with Daywalker's public JWKS. */
-  lease: string;
-  tokenType?: string;
+/** Tokens from the client credentials flow (POST /api/v1/oauth/token). */
+export interface TokenSet {
+  /** Short-lived (5-15 min) EdDSA JWT. Verify it with Daywalker's public JWKS. */
+  accessToken: string;
+  /** Single use: every refresh returns a new one. Keep it server-side. */
+  refreshToken: string;
+  tokenType: string;
   /** Unix seconds. */
-  expiresAt?: number | string;
-  jwksUri?: string;
-  /** Every service slug the lease covers (also its `services` and `aud` claims). */
+  expiresAt: number;
+  expiresIn: number;
+  /** Seconds until the session ends and the client credentials must be used again. */
+  refreshExpiresIn: number;
+  scope: string;
+  /** Every service slug the access token covers (also its `services` and `aud` claims). */
   services: string[];
+  jwksUri?: string;
 }
 
-export interface IssueLeaseOptions {
-  /** Lease lifetime in seconds (Daywalker clamps it to 1h-24h). */
-  ttlSeconds?: number;
-  /**
-   * Narrow the lease to these service slugs (least privilege). Each must be one the API key covers;
-   * otherwise Daywalker answers 403 `SERVICE_NOT_GRANTED`. Default: every service the key covers.
-   */
-  services?: string[];
+export interface GetTokensOptions {
+  /** Narrow the grant to these service slugs (least privilege); default: every service the credentials cover. */
+  scope?: string[];
+  /** Access token lifetime in seconds (Daywalker clamps it to 300-900). */
+  expiresIn?: number;
+}
+
+/** The `user` claim of an access token. */
+export interface AccessTokenUser {
+  /** The user's public UUID v7. */
+  id: string;
+  name: string | null;
+  email: string;
 }
 
 export interface SelfCheckResult {

@@ -485,8 +485,8 @@ export function leaseServices(payload: Record<string, unknown>): string[] {
   return Array.from(new Set(fallback.map((s) => s.toLowerCase())));
 }
 
-/** Clock skew tolerated on JWT lease `exp` / `nbf`. */
-export const JWT_CLOCK_SKEW_SECONDS = 60;
+/** Clock skew tolerated on JWT `exp` / `nbf`: 30 seconds, and never more (see `clockSkewSeconds`). */
+export const JWT_CLOCK_SKEW_SECONDS = 30;
 
 /**
  * Zero-egress offline verification for asymmetric JWT token leases.
@@ -530,7 +530,8 @@ export async function verifyJwtLease(params: {
     if (header.alg !== "EdDSA" && header.alg !== "ed25519") {
       return { valid: false, error: `Unsupported JWT alg: ${header.alg}` };
     }
-    if (header.typ !== undefined && String(header.typ).toUpperCase() !== "JWT") {
+    // "JWT" (older leases) or "at+jwt" (RFC 9068 access tokens); a refresh token ("rt+jwt") is never accepted here
+    if (header.typ !== undefined && !["JWT", "AT+JWT"].includes(String(header.typ).toUpperCase())) {
       return { valid: false, error: `Unsupported JWT typ: ${header.typ}` };
     }
     // RFC 7515 §4.1.11: extensions we don't understand must be rejected; we implement none.
@@ -556,7 +557,10 @@ export async function verifyJwtLease(params: {
     }
 
     const now = params.currentTime ?? Math.floor(Date.now() / 1000);
-    const skew = Math.max(0, Math.min(params.clockSkewSeconds ?? JWT_CLOCK_SKEW_SECONDS, 300));
+    const skew = Math.max(0, Math.min(params.clockSkewSeconds ?? JWT_CLOCK_SKEW_SECONDS, JWT_CLOCK_SKEW_SECONDS));
+    if (typeof payload.jti !== "string" || payload.jti === "") {
+      return { valid: false, error: "JWT has no jti claim" };
+    }
     if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) {
       return { valid: false, error: "JWT token lease has no numeric exp claim" };
     }

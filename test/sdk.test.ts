@@ -193,7 +193,7 @@ describe("Zero-egress offline JWT lease verification", () => {
 
   function createTestJwt(payload: Record<string, unknown>) {
     const header = Buffer.from(JSON.stringify({ alg: "EdDSA", typ: "JWT" })).toString("base64url");
-    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const body = Buffer.from(JSON.stringify({ jti: "j1", iss: "https://auth.daywalker.dev", ...payload })).toString("base64url");
     const sig = crypto.sign(null, Buffer.from(`${header}.${body}`, "utf8"), privateKey).toString("base64url");
     return `${header}.${body}.${sig}`;
   }
@@ -226,7 +226,7 @@ describe("Zero-egress offline JWT lease verification", () => {
     const expiredJwt = createTestJwt({
       sub: "tok_12345",
       serviceSlug: "myservice",
-      exp: now - 120, // beyond the 60s clock skew allowance
+      exp: now - 120, // beyond the 30s clock skew allowance
     });
 
     const res1 = await verifyJwtLease({ token: expiredJwt, publicKey: pubJwk, currentTime: now });
