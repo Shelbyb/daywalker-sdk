@@ -397,6 +397,17 @@ Tokens must be RFC 9068 access tokens (`typ: at+jwt`, `alg: EdDSA`) with a numer
 
 ---
 
+## Service License & Config Bundle
+
+Daywalker issues each service a license key with the client credentials grant: derived per service, signing key and one-hour window, never returned for a revoked or suspended service.
+
+```ts
+const { licenseKey, expiresAt } = await client.getLicense();   // cached until a minute before expiry
+const bundle = await client.fetchBundle();                     // { dataKeySalt, features, issuedAt, expiresAt, ... }
+```
+
+`fetchBundle()` downloads a bundle sealed (AES-256-GCM) under the license key and opens it locally, so only a client that got the license from Daywalker can read it. Derive app secrets from `licenseKey` + `bundle.dataKeySalt` (HKDF) so removing the SDK breaks the app. Errors are `DaywalkerAuthError`s: `SERVICE_REVOKED`, `SERVICE_SUSPENDED`, `DOMAIN_REVOKED`, `DOMAIN_MISMATCH`, `LICENSE_UNAVAILABLE`, `BUNDLE_UNREADABLE`. Never log the key.
+
 ## CLI Reference
 
 | Command | Description |

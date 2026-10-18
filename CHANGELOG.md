@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+**Service licensing** (needs the auth.daywalker.dev release with per-service licenses and `POST /api/v1/services/:slug/bundle`). Fully additive; `validateServiceCredentials()` is unchanged.
+- New `client.getLicense({ serviceSlug?, forceRefresh? })` returning `{ serviceSlug, licenseKey, expiresAt }`. The key is derived by Daywalker per service, signing key and one-hour window, comes with the client credentials grant, and is cached in memory until a minute before it expires. It is never part of `TokenSet` or `toJSON()`.
+- New `client.fetchBundle({ serviceSlug?, forceRefresh? })` returning the config bundle (`serviceSlug`, `dataKeySalt`, `features`, `issuedAt`, `expiresAt`). It is sealed with AES-256-GCM under the license key and opened locally; at a window rollover the license is refreshed once and the bundle opened again. Frozen result, cached until a minute before it expires.
+- Errors are `DaywalkerAuthError`s with Daywalker's code: `SERVICE_REVOKED`, `SERVICE_SUSPENDED`, `DOMAIN_REVOKED`, `DOMAIN_MISMATCH`; the SDK adds `LICENSE_UNAVAILABLE` (403, granted without a license) and `BUNDLE_UNREADABLE` (502).
+- New exported types `License`, `LicenseOptions`, `ConfigBundle`.
+
 ## 0.7.0
 **OAuth access tokens instead of the API key, and hardening against tampering.** Follows the Daywalker API docs: `POST /api/v1/tokens/validate` requires `Authorization: DPoP <access_token>`, and bearer API keys are refused with `401 DPOP_REQUIRED`.
 
