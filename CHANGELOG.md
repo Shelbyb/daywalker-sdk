@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- package.json: the description no longer says "zero-dependency" (`re2js` has been a runtime dependency since 0.4.0).
+- Internal maintenance notes in `docs/maintenance/` are excluded from the published package.
+
 ## 0.4.1
 No code changes.
 - Published from GitHub Actions with npm trusted publishing (OIDC) and a provenance attestation, instead of from a maintainer's machine.
