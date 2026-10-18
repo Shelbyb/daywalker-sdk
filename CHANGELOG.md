@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- `fetchBundle()` errors now name the request and HTTP status (`Bundle request for <slug> failed (HTTP 401): ...`) and always carry a code: the service's `code`/`error`, otherwise derived from the status (`INVALID_TOKEN`, `FORBIDDEN`, `SERVICE_NOT_FOUND`, `RATE_LIMITED`, `SERVICE_UNAVAILABLE`, `BUNDLE_REQUEST_FAILED`).
+
 ## 0.9.0
 **Per-service license keys, sealed config bundle, and tamper resistance.** Adds technical enforcement ensuring consumer apps cannot bypass Daywalker verification without breaking functionality.
 - `client.getLicense({ serviceSlug?, forceRefresh? })`: returns `{ serviceSlug, licenseKey, expiresAt }`. The derived key is computed as HKDF-SHA256(serviceSecret, salt = serviceSlug + keyId + hourWindow, info = "daywalker-license-v1") and cached in memory until shortly before expiry.

@@ -259,6 +259,15 @@ async function readJsonObject(res: Response, timeoutMs: number): Promise<Record<
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
 }
 
+/** Stable fallback error code for a failed bundle request that carried no code of its own. */
+function bundleStatusCode(status: number): string {
+  if (status === 401) return "INVALID_TOKEN";
+  if (status === 403) return "FORBIDDEN";
+  if (status === 404) return "SERVICE_NOT_FOUND";
+  if (status === 429) return "RATE_LIMITED";
+  return status >= 500 ? "SERVICE_UNAVAILABLE" : "BUNDLE_REQUEST_FAILED";
+}
+
 function isRedirect(res: Response): boolean {
   return res.type === "opaqueredirect" || REDIRECT_STATUSES.has(res.status);
 }
@@ -1507,10 +1516,13 @@ export class Daywalker {
       const json = await readJsonObject(res, this.#config.timeoutMs);
       const str = (v: unknown) => (typeof v === "string" ? v.slice(0, 500) : undefined);
       if (res.status !== 200) {
+        // Always say which request failed and with what status, and always carry a stable code: the service's own
+        // `code`/`error` when it sent one, otherwise one derived from the HTTP status.
+        const detail = str(json.message) ?? str(json.error);
         throw new DaywalkerAuthError(
-          redactSecrets(str(json.message) ?? str(json.error) ?? `Bundle request failed with HTTP ${res.status}`),
+          redactSecrets(`Bundle request for ${slug} failed (HTTP ${res.status})${detail ? `: ${detail}` : ""}`),
           res.status,
-          str(json.code) ?? str(json.error)
+          str(json.code) ?? str(json.error) ?? bundleStatusCode(res.status)
         );
       }
       const sealed = json.bundle as Record<string, unknown> | undefined;

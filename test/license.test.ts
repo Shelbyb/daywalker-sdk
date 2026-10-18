@@ -98,4 +98,17 @@ describe("License and config bundle", () => {
     const { client } = await setup({ bundleError: Response.json({ error: "SERVICE_REVOKED", message: "revoked" }, { status: 403 }) });
     await assert.rejects(client.fetchBundle(), (e: any) => e.status === 403 && e.code === "SERVICE_REVOKED");
   });
+
+  it("fetchBundle reports the status, the service's message and a fallback code when the service sent none", async () => {
+    const { client } = await setup({ bundleError: Response.json({ error: "Unauthorized", message: "Authentication required" }, { status: 401 }) });
+    await assert.rejects(
+      client.fetchBundle(),
+      (e: any) => e.status === 401 && e.code === "Unauthorized" && /svc/.test(e.message) && /HTTP 401/.test(e.message) && /Authentication required/.test(e.message)
+    );
+  });
+
+  it("fetchBundle derives a code from the status when the body is not JSON", async () => {
+    const { client } = await setup({ bundleError: new Response("<html>bad gateway</html>", { status: 502 }) });
+    await assert.rejects(client.fetchBundle(), (e: any) => e.status === 502 && e.code === "SERVICE_UNAVAILABLE" && /HTTP 502/.test(e.message));
+  });
 });
