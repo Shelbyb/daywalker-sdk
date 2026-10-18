@@ -213,6 +213,15 @@ export interface DaywalkerConfig {
    * and saves it. Ignored when `signingKey` or `signer` is set.
    */
   keyStore?: KeyStore;
+  /**
+   * Ephemeral signing keys (env DAYWALKER_EPHEMERAL_KEY=true): the key is generated in memory, non-extractable,
+   * registered for `domain` with a lifetime (`ttlSeconds`, default 6 hours; env DAYWALKER_KEY_TTL_SECONDS) in
+   * this process's own slot (`instanceId`, default random; env DAYWALKER_INSTANCE_ID), and replaced in the
+   * same slot before it expires. Nothing is stored anywhere. `close()` revokes it at shutdown. Daywalker allows
+   * 20 live keys per domain, so give long-lived instances a stable `instanceId` (a restart then replaces its
+   * previous key) and prefer a shared `keyStore` for serverless. Can't be combined with `keyStore`.
+   */
+  ephemeralKey?: boolean | { ttlSeconds?: number; instanceId?: string };
   /** Signs requests with an external key (KMS / HSM) instead of a local one. Takes precedence over everything. */
   signer?: MessageSigner;
   /** Per-attempt timeout for requests to Daywalker Auth. Default 5000ms; 0 disables. */

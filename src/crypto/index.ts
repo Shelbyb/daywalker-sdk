@@ -42,8 +42,21 @@ export {
   verifyRequestSignature,
   verifyJwtLease,
   leaseServices,
-  registerPublicKey,
+  SERVICE_SLUG_PATTERN,
+  API_KEY_PATTERN,
 } from "./signatures.js";
+
+export {
+  registerPublicKey,
+  listSigningKeys,
+  revokeSigningKey,
+  keySlotFor,
+  randomInstanceId,
+  INSTANCE_ID_PATTERN,
+  MIN_KEY_TTL_SECONDS,
+  MAX_KEY_TTL_SECONDS,
+} from "./key-api.js";
+export type { SigningKeyRecord, KeyApiResult } from "./key-api.js";
 
 export type {
   SignedHeaders,

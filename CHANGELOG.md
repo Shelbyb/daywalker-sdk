@@ -22,6 +22,13 @@
 - New `signer` option for KMS / HSM keys: requests are signed through the callback, so the private key never exists in the app. It's checked once against `publicJwk` when given, and captured at construction. `signRequest()` accepts `signer` in place of `key`.
 - `selfCheck()` reports what first-use provisioning needs without provisioning anything.
 
+**Signing key lifecycle** (Daywalker's key slots, expiry, list and revoke APIs)
+- **Fix:** every key the SDK and CLI register now gets its own `instanceId` slot (`dw-<keyId>`). Daywalker retires every other slot-less key of a domain 10 minutes after a registration without `instanceId`. Without the slot, `daywalker rotate` would have broken the deployed key 10 minutes later, and racing auto-provisioning instances would have retired each other's keys.
+- New ephemeral mode (`ephemeralKey`, env `DAYWALKER_EPHEMERAL_KEY` / `DAYWALKER_KEY_TTL_SECONDS` / `DAYWALKER_INSTANCE_ID`): a non-extractable in-memory key registered with a lifetime in this process's slot and replaced in place before it expires (in the background while the old key is still good, retried at most every 30s). Tokens from before a replacement are treated as stale, so the next OAuth session uses the new key. `client.close()` revokes the key; the client then refuses further use. Can't be combined with `keyStore`.
+- New `listSigningKeys()`, `revokeSigningKey()`, `keySlotFor()`; `registerPublicKey()` takes `instanceId`, `ttlSeconds`, `expiresAt`, returns Daywalker's error `code` and the key record, and refuses an answer about another key. The key API calls refuse redirects, time out, skip caches and bound answers.
+- Auto-provisioning revokes the key it registered when another instance stored one first, instead of only warning.
+- `KEY_LIMIT_REACHED` errors explain how to free a slot. New CLI commands `daywalker keys` and `daywalker revoke <keyId>` (refuses the current `DAYWALKER_KEY_ID` without `--force`); `init --force` and `rotate` print the revoke command for the previous key.
+
 **Hardening**
 - **Breaking:** incoming DPoP-bound access tokens (`cnf.jkt`) need `Authorization: DPoP` and a valid DPoP proof (method, URL, key thumbprint, `ath`, fresh `iat`, single-use `jti`), checked even for cached results. New `verifyDpopProof()`, `publicOrigin` / `DAYWALKER_PUBLIC_ORIGIN` (for proxies) and `dpopReplayStore`.
 - **Breaking:** an online validation answer must name the service it was validated for, and that must be this service. A token for a sibling service the credentials also cover is refused with `403 SERVICE_NOT_GRANTED`; an answer naming no service fails closed (503). Adapters map 403 through.

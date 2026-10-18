@@ -8,11 +8,9 @@ import {
   stringToUtf8,
   utf8ToString,
   timingSafeEqualString,
-  redactSecrets,
 } from "./encoding.js";
 import { computeContentDigest } from "./digest.js";
 import { loadPublicKey, loadSigningKey } from "./keys.js";
-import { assertSecureUrl, parseServiceSlugs, publicHostname } from "../config.js";
 
 export const SIGNATURE_VERSION = "rfc9421";
 export const SIGNATURE_LABEL = "sig1";
@@ -618,89 +616,5 @@ export async function verifyJwtLease(params: {
     return { valid: true, payload };
   } catch (err) {
     return { valid: false, error: `Failed to verify JWT lease: ${(err as Error).message}` };
-  }
-}
-
-/** Per-attempt timeout for key registration. */
-const REGISTER_TIMEOUT_MS = 10_000;
-
-/**
- * Register public key directly with Daywalker Auth via POST /api/v1/keys/register (Push Architecture).
- * The API key is sent as `Authorization: Bearer` to `authUrl` only: redirects are refused (never followed
- * with the key), the request times out after 10s, and nothing is cached. Inputs are validated first.
- */
-export async function registerPublicKey(params: {
-  authUrl?: string;
-  apiKey: string;
-  serviceSlug?: string;
-  domain?: string | null;
-  publicJwk: PublicJwk;
-  fetchFn?: typeof fetch;
-}): Promise<{ ok: boolean; status: number; error?: string }> {
-  const authUrl = (params.authUrl ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
-  try {
-    assertSecureUrl("authUrl", authUrl);
-  } catch (err) {
-    return { ok: false, status: 0, error: (err as Error).message };
-  }
-  const registerUrl = `${authUrl}/api/v1/keys/register`;
-  const doFetch = params.fetchFn ?? globalThis.fetch;
-
-  if (!params.domain) {
-    return { ok: false, status: 400, error: "domain is required to register a key (set --domain or DAYWALKER_DOMAIN)" };
-  }
-  const domain = publicHostname(params.domain);
-  if (!domain) {
-    return { ok: false, status: 400, error: `domain (${params.domain}) is not a public hostname` };
-  }
-  if (typeof params.apiKey !== "string" || !API_KEY_PATTERN.test(params.apiKey)) {
-    return { ok: false, status: 400, error: "apiKey is missing or contains characters an API key can't have" };
-  }
-  const slugs = params.serviceSlug ? parseServiceSlugs(params.serviceSlug) : [];
-  if (!slugs.every((slug) => SERVICE_SLUG_PATTERN.test(slug))) {
-    return { ok: false, status: 400, error: "serviceSlug must be Daywalker service slug(s)" };
-  }
-  const jwk = params.publicJwk;
-  if (!jwk || jwk.kty !== "OKP" || jwk.crv !== "Ed25519" || typeof jwk.x !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(jwk.x) || "d" in jwk) {
-    return { ok: false, status: 400, error: "publicJwk must be an Ed25519 public JWK (never a private key)" };
-  }
-  try {
-    assertSafeIdentifier("keyId", jwk.kid);
-  } catch (err) {
-    return { ok: false, status: 400, error: (err as Error).message };
-  }
-
-  try {
-    const res = await doFetch(registerUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Authorization: `Bearer ${params.apiKey}`,
-      },
-      body: JSON.stringify({
-        keyId: jwk.kid,
-        domain,
-        publicKey: { kty: "OKP", crv: "Ed25519", x: jwk.x, kid: jwk.kid, use: "sig", alg: "EdDSA" },
-        // Lets Daywalker refuse right away when the API key doesn't cover the service(s); a comma-separated list is fine
-        ...(slugs.length > 0 ? { serviceSlug: slugs.join(",") } : {}),
-      }),
-      redirect: "manual",
-      cache: "no-store",
-      signal: AbortSignal.timeout(REGISTER_TIMEOUT_MS),
-    });
-
-    if (res.type === "opaqueredirect" || (res.status >= 300 && res.status < 400)) {
-      return { ok: false, status: res.status, error: "Daywalker Auth answered with a redirect; refusing to follow it with the API key" };
-    }
-    if (res.ok) {
-      return { ok: true, status: res.status };
-    }
-
-    const data = (await res.json().catch(() => ({}))) as { message?: unknown; error?: unknown };
-    const message = typeof data.message === "string" ? data.message : typeof data.error === "string" ? data.error : `HTTP ${res.status}`;
-    return { ok: false, status: res.status, error: redactSecrets(message.slice(0, 500)) };
-  } catch (err) {
-    return { ok: false, status: 0, error: redactSecrets((err as Error).message) };
   }
 }

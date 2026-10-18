@@ -16,6 +16,10 @@ import {
   importSigningKey,
   generateSigningKey,
   registerPublicKey,
+  revokeSigningKey,
+  keySlotFor,
+  randomInstanceId,
+  calculateJwkThumbprint,
   base64UrlToBytes,
   utf8ToString,
   type DpopKey,
@@ -395,10 +399,11 @@ function deepFreeze<T>(value: T): T {
 type CapturedKeyStore = Readonly<{ load: KeyStore["load"]; saveIfAbsent?: NonNullable<KeyStore["saveIfAbsent"]> }>;
 
 /** What signs this client's requests, and where it came from. */
-type ActiveSigner = Readonly<{ signer: MessageSigner; publicJwk?: PublicJwk; source: "signer" | "signingKey" | "keyStore" }>;
+type SignerSource = "signer" | "signingKey" | "ephemeral" | "keyStore";
+type ActiveSigner = Readonly<{ signer: MessageSigner; publicJwk?: PublicJwk; source: SignerSource }>;
 
 /** A local key as a signer; its private key never leaves the closure. */
-function localSigner(key: SigningKey, keyId: string, source: "signingKey" | "keyStore"): ActiveSigner {
+function localSigner(key: Pick<SigningKey, "privateKey" | "publicJwk">, keyId: string, source: Exclude<SignerSource, "signer">): ActiveSigner {
   const privateKey = key.privateKey;
   return Object.freeze({
     signer: Object.freeze({
@@ -422,6 +427,14 @@ export class Daywalker {
   readonly #externalSigner: MessageSigner | null;
   readonly #keyStore: CapturedKeyStore | null;
   #signerPromise: Promise<ActiveSigner | null> | null = null;
+  /** Ephemeral mode: this process's key slot, its current key, the rotation in flight, and when to retry one. */
+  readonly #ephemeralSlot: string | null;
+  #ephemeral: { signer: ActiveSigner; keyId: string; expiresAt: number } | null = null;
+  #ephemeralRotation: Promise<ActiveSigner> | null = null;
+  #ephemeralRetryAt = 0;
+  /** Bumped whenever the ephemeral key is replaced; tokens requested under an older generation are stale. */
+  #keyGeneration = 0;
+  #closed = false;
   #signingKeyPromise?: Promise<SigningKey>;
   #previousSigningKeyPromise?: Promise<SigningKey>;
   readonly #cache = new Map<string, { result: ValidateResult; expiresAt: number; jkt?: string }>();
@@ -473,6 +486,8 @@ export class Daywalker {
     }
     const store = config.keyStore;
     if (store && typeof store.load !== "function") throw new DaywalkerError("config.keyStore needs a load() function");
+    if (store && resolved.ephemeralKey) throw new DaywalkerError("Use either keyStore or ephemeralKey, not both");
+    this.#ephemeralSlot = resolved.ephemeralKey ? (resolved.ephemeralKey.instanceId ?? randomInstanceId()) : null;
     this.#keyStore = store
       ? Object.freeze({
           load: store.load.bind(store),
@@ -523,6 +538,8 @@ export class Daywalker {
    * A failure isn't remembered, so the next request tries again.
    */
   #getSigner(): Promise<ActiveSigner | null> {
+    if (this.#closed) return Promise.reject(new DaywalkerError("This Daywalker client was closed", undefined, "CLIENT_CLOSED"));
+    if (this.#config.ephemeralKey && !this.#externalSigner && !this.#config.signingKey) return this.#ephemeralSigner();
     if (!this.#signerPromise) {
       this.#signerPromise = this.#resolveSigner().catch((err) => {
         this.#signerPromise = null;
@@ -601,19 +618,8 @@ export class Daywalker {
     const raced = await this.#loadStored(store);
     if (raced) return this.#useStored(raced);
 
-    const registration = await registerPublicKey({
-      authUrl: this.#config.authUrl,
-      apiKey: this.#config.apiKey,
-      domain,
-      serviceSlug: this.#config.serviceSlugs.length > 0 ? this.#config.serviceSlugs.join(",") : undefined,
-      publicJwk: generated.publicJwk,
-      fetchFn: this.#fetch,
-    });
-    if (!registration.ok) {
-      const message = `Registering the signing key failed (${registration.status || "network"}): ${registration.error ?? "unknown error"}`;
-      if (registration.status === 0 || registration.status >= 500) throw new DaywalkerError(message, registration.status || undefined);
-      throw new DaywalkerAuthError(message, 503, "KEY_REGISTRATION_FAILED");
-    }
+    // Its own slot, so registering it never demotes a key another instance is already using.
+    await this.#register(generated.publicJwk, { instanceId: keySlotFor(generated.publicJwk.kid) });
 
     const record: StoredSigningKey = {
       version: 1,
@@ -626,17 +632,122 @@ export class Daywalker {
 
     const winner = await this.#loadStored(store);
     if (!winner) throw new DaywalkerAuthError("The key store refused the signing key but holds none", 500, "CONFIGURATION_ERROR");
-    console.warn(
-      `[daywalker] Another instance stored its signing key first; key ${record.keyId} was registered for ${domain} but is unused. Revoke it in the Daywalker dashboard.`
-    );
+    // Another instance stored its key first: ours was registered but will never be used, so revoke it.
+    const revoked = await revokeSigningKey({ authUrl: this.#config.authUrl, apiKey: this.#config.apiKey, keyId: record.keyId, fetchFn: this.#fetch });
+    if (!revoked.ok) {
+      console.warn(`[daywalker] Unused signing key ${record.keyId} (${domain}) could not be revoked (${revoked.status} ${revoked.error}); revoke it with \`npx daywalker revoke ${record.keyId}\`.`);
+    }
     return this.#useStored(winner);
+  }
+
+  /**
+   * Ephemeral mode: the current in-memory key, replaced in the same slot once a quarter of its lifetime is left.
+   * While the old key is still good for more than a minute, requests keep using it and the replacement registers
+   * in the background (Daywalker keeps the old one valid for 10 more minutes). A failed replacement is retried
+   * at most every 30 seconds.
+   */
+  async #ephemeralSigner(): Promise<ActiveSigner> {
+    const now = Math.floor(Date.now() / 1000);
+    const ttl = this.#config.ephemeralKey!.ttlSeconds;
+    const current = this.#ephemeral;
+    if (current && current.expiresAt - now > ttl / 4) return current.signer;
+    const usable = current && current.expiresAt - now > 60;
+    if (usable && Date.now() < this.#ephemeralRetryAt) return current.signer;
+    if (!this.#ephemeralRotation) {
+      this.#ephemeralRotation = this.#rotateEphemeral()
+        .catch((err) => {
+          this.#ephemeralRetryAt = Date.now() + 30_000;
+          throw err;
+        })
+        .finally(() => {
+          this.#ephemeralRotation = null;
+        });
+    }
+    if (usable) {
+      this.#ephemeralRotation.catch(() => {});
+      return current.signer;
+    }
+    return this.#ephemeralRotation;
+  }
+
+  /** Generates a non-extractable key in memory and registers it in this process's slot with a lifetime. */
+  async #rotateEphemeral(): Promise<ActiveSigner> {
+    if (!this.#config.apiKey) {
+      throw new DaywalkerAuthError("DAYWALKER_API_KEY is needed to register an ephemeral signing key", 500, "CONFIGURATION_ERROR");
+    }
+    if (!this.#config.domain) {
+      throw new DaywalkerAuthError("No public domain detected to register a signing key for: set DAYWALKER_DOMAIN", 500, "CONFIGURATION_ERROR");
+    }
+    const ttl = this.#config.ephemeralKey!.ttlSeconds;
+    const pair = (await webcrypto.generateKey({ name: "Ed25519" } as any, false, ["sign", "verify"])) as CryptoKeyPair;
+    const { x } = (await webcrypto.exportKey("jwk", pair.publicKey)) as { x: string };
+    const kid = await calculateJwkThumbprint({ crv: "Ed25519", kty: "OKP", x });
+    const publicJwk: PublicJwk = { kty: "OKP", crv: "Ed25519", x, kid, use: "sig", alg: "EdDSA" };
+    const registration = await this.#register(publicJwk, { instanceId: this.#ephemeralSlot!, ttlSeconds: ttl });
+    if (this.#closed) {
+      // close() ran while this registered: don't leave the key behind.
+      await revokeSigningKey({ authUrl: this.#config.authUrl, apiKey: this.#config.apiKey, keyId: kid, fetchFn: this.#fetch });
+      throw new DaywalkerError("This Daywalker client was closed", undefined, "CLIENT_CLOSED");
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = Math.min(registration.key?.expiresAt ?? Infinity, now + ttl);
+    const signer = localSigner({ privateKey: pair.privateKey, publicJwk }, kid, "ephemeral");
+    const replaced = this.#ephemeral !== null;
+    this.#ephemeral = { signer, keyId: kid, expiresAt };
+    // OAuth sessions are tied to the key that started them: tokens from before this point are now stale, even a
+    // grant still in flight, so the next accessToken() starts a session with the new key.
+    if (replaced) this.#keyGeneration++;
+    return signer;
+  }
+
+  /**
+   * Shuts the client down: revokes its ephemeral signing key (which also ends the OAuth sessions it started)
+   * and forgets its tokens. Afterwards every call that needs Daywalker fails with CLIENT_CLOSED. Safe to call
+   * twice. Keys from `signingKey`, `keyStore` or `signer` are long-lived and are left alone.
+   */
+  public async close(): Promise<{ revoked: string[]; failed: string[] }> {
+    if (this.#closed) return { revoked: [], failed: [] };
+    this.#closed = true;
+    await this.#ephemeralRotation?.catch(() => {});
+    const current = this.#ephemeral;
+    this.#ephemeral = null;
+    this.#tokens = null;
+    if (!current || !this.#config.apiKey) return { revoked: [], failed: [] };
+    const result = await revokeSigningKey({ authUrl: this.#config.authUrl, apiKey: this.#config.apiKey, keyId: current.keyId, fetchFn: this.#fetch });
+    return result.ok ? { revoked: [current.keyId], failed: [] } : { revoked: [], failed: [current.keyId] };
+  }
+
+  /**
+   * Registers a public key with Daywalker for this service's domain. Failures become errors the validation
+   * paths map to 503 (an outage, or credentials Daywalker refuses), with Daywalker's code in the message and
+   * what to do about a full domain.
+   */
+  async #register(publicJwk: PublicJwk, options: { instanceId: string; ttlSeconds?: number }) {
+    const registration = await registerPublicKey({
+      authUrl: this.#config.authUrl,
+      apiKey: this.#config.apiKey!,
+      domain: this.#config.domain,
+      serviceSlug: this.#config.serviceSlugs.length > 0 ? this.#config.serviceSlugs.join(",") : undefined,
+      publicJwk,
+      instanceId: options.instanceId,
+      ttlSeconds: options.ttlSeconds,
+      fetchFn: this.#fetch,
+    });
+    if (registration.ok) return registration;
+    const hint =
+      registration.code === "KEY_LIMIT_REACHED"
+        ? " The domain has 20 live keys: list them with `npx daywalker keys` and revoke unused ones with `npx daywalker revoke <keyId>`."
+        : "";
+    const message = `Registering the signing key failed (${registration.status || "network"}${registration.code ? ` ${registration.code}` : ""}): ${registration.error ?? "unknown error"}.${hint}`;
+    if (registration.status === 0 || registration.status >= 500) throw new DaywalkerError(message, registration.status || undefined);
+    throw new DaywalkerAuthError(message, 503, "KEY_REGISTRATION_FAILED");
   }
 
   /**
    * Resolves the signing key now instead of on the first request: loads it, or provisions and registers it
    * (see `keyStore`). Call it at startup to fail fast. Returns where the key came from and its id.
    */
-  public async provisionSigningKey(): Promise<{ source: "signer" | "signingKey" | "keyStore"; keyId: string } | null> {
+  public async provisionSigningKey(): Promise<{ source: SignerSource; keyId: string } | null> {
     const active = await this.#getSigner();
     return active ? { source: active.source, keyId: active.signer.keyId } : null;
   }
@@ -1188,6 +1299,8 @@ export class Daywalker {
   }
 
   #tokens: TokenSet | null = null;
+  /** The key generation that was current when `#tokens` was requested. */
+  #tokenGeneration = 0;
   #tokenFlight: Promise<TokenSet> | null = null;
 
   /**
@@ -1263,12 +1376,14 @@ export class Daywalker {
     if (options.expiresIn !== undefined && (!Number.isInteger(options.expiresIn) || options.expiresIn < 300 || options.expiresIn > 900)) {
       throw new DaywalkerAuthError("getTokens: expiresIn must be a whole number of seconds from 300 to 900", 400, "INVALID_REQUEST");
     }
+    const generation = this.#keyGeneration;
     const tokens = await this.#tokenRequest({
       grant_type: "client_credentials",
       ...(scope ? { scope: scope.join(" ") } : {}),
       ...(options.expiresIn ? { expires_in: options.expiresIn } : {}),
     });
     this.#tokens = tokens;
+    this.#tokenGeneration = generation;
     return tokens;
   }
 
@@ -1283,8 +1398,10 @@ export class Daywalker {
     if (typeof token !== "string" || token.length > MAX_TOKEN_LENGTH || !TOKEN_PATTERN.test(token)) {
       throw new DaywalkerAuthError("refreshTokens: malformed refresh token", 400, "INVALID_REQUEST");
     }
+    const generation = this.#keyGeneration;
     const tokens = await this.#tokenRequest({ grant_type: "refresh_token", refresh_token: token });
     this.#tokens = tokens;
+    this.#tokenGeneration = generation;
     return tokens;
   }
 
@@ -1294,7 +1411,8 @@ export class Daywalker {
    * refresh token is never presented twice.
    */
   public async accessToken(): Promise<string> {
-    const current = this.#tokens;
+    // Tokens from before the signing key was replaced belong to the old key's session: start a new one.
+    const current = this.#tokenGeneration === this.#keyGeneration ? this.#tokens : null;
     if (current && current.expiresAt - 30 > Math.floor(Date.now() / 1000)) return current.accessToken;
     if (!this.#tokenFlight) {
       this.#tokenFlight = (async () => {
@@ -1421,6 +1539,10 @@ export class Daywalker {
       });
       signing = Boolean(signingKey);
       keyId = this.#config.keyId ?? signingKey?.publicJwk.kid ?? null;
+    } else if (this.#config.ephemeralKey) {
+      signing = Boolean(this.#config.domain);
+      keyId = this.#ephemeral?.keyId ?? null;
+      if (!this.#config.domain) problems.push("No public domain detected: set DAYWALKER_DOMAIN so the ephemeral signing key can be registered");
     } else if (this.#keyStore) {
       const store = this.#keyStore;
       try {
