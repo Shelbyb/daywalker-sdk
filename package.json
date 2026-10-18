@@ -1,6 +1,6 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics) in one zero-dependency package.",
   "type": "module",
   "main": "./dist/index.js",
