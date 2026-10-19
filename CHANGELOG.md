@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.0
+- **`daywalker license apply|check`:** installs and verifies the DevPulse source-available license in a project: `LICENSE`, `"license": "SEE LICENSE IN LICENSE"` in `package.json` (root and workspaces; `"private"` is never changed), a README section, a notice header on every file that imports the SDK or calls its guards, and the boot log line (added to Next.js `instrumentation.ts` when present). Idempotent, `--dry-run`, and `check` exits non-zero for CI. Comments and metadata only; it never edits code that calls the SDK. See `docs/license.md`.
+- The bundled license text is a reviewed redraft (defined terms, no circumvention, tiers, redistribution, patents, trademarks, termination with cure); governing law is an owner decision (`--governing-law`).
+- A Claude Code skill, `skills/apply-license`, drives the command and handles the build/Docker steps it only lists.
+
 ## 0.15.0
 - **Licensing and CLA updates:** Updated project license to a proprietary SDK license (`UNLICENSED` in `package.json`) and added `CONTRIBUTING.md` outlining the Contributor License Agreement (CLA) terms and contribution guidelines.
 

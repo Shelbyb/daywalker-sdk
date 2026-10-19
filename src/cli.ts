@@ -4,6 +4,7 @@ import path from "node:path";
 import { createDaywalker } from "./client.js";
 import { parseServiceSlugs, publicHostname } from "./config.js";
 import { runOnboard } from "./onboard/index.js";
+import { applyLicense, checkLicense, formatReport } from "./license/index.js";
 import { generateSigningKey, keySlotFor, listSigningKeys, loadSigningKey, registerPublicKey, redactSecrets, revokeSigningKey, type KeyApiResult } from "./crypto/index.js";
 
 const HELP = `daywalker: connect a service to Daywalker Auth (RFC 9421 / Push Architecture)
@@ -15,6 +16,8 @@ Usage:
   daywalker check  [--offline]
   daywalker keys   [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--json]
   daywalker revoke <keyId> [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--force]
+  daywalker license apply [--dir <path>] [--governing-law <text>] [--include <file,…>] [--guard-names <name,…>] [--replace-existing] [--dry-run]
+  daywalker license check [--dir <path>] [--include <file,…>] [--guard-names <name,…>]
 
 onboard  Guided setup for a new developer: sign up (or log in), verify the email, pick a service from the live
          list, give the public app URL, create an API token (allowed origins: the URL plus https://localhost:3000),
@@ -33,6 +36,12 @@ check    Validates configuration and signature readiness, then runs the OAuth cl
 keys     Lists the signing keys registered for the domain (status, slot, expiry, last use).
 revoke   Revokes a signing key now; Daywalker also ends the OAuth sessions it started. Refuses the key in
          DAYWALKER_KEY_ID (the one this service signs with) unless --force.
+
+license  apply installs the DevPulse source-available license in a project: LICENSE, "license" in package.json (root and
+         workspaces; "private" is never changed), a README section, a notice header on every file that imports this SDK or
+         calls its guards, and the boot log line (added to Next.js instrumentation.ts when there is one). It only adds comments
+         and metadata and is safe to re-run. check exits non-zero when anything is missing or out of date (use it in CI).
+         Bundler banners, Dockerfile COPY and the governing-law clause are listed as things to do by hand or by flag.
 
 Options:
   --api-key-stdin   Read the Daywalker API key from stdin (e.g. \`op read ... | daywalker init --api-key-stdin\`).
@@ -445,6 +454,23 @@ async function main() {
     await check(parsedArgs);
   } else if (cmd === "keys") {
     await keys(parsedArgs);
+  } else if (cmd === "license") {
+    const sub = rest[0];
+    if (sub !== "apply" && sub !== "check") fail("Usage: daywalker license apply|check [--dir <path>] (see --help)");
+    const list = (v: string | boolean | undefined) => (typeof v === "string" ? v.split(",").map((x) => x.trim()).filter(Boolean) : undefined);
+    const dir = path.resolve(typeof parsedArgs.dir === "string" ? parsedArgs.dir : ".");
+    if (!fs.existsSync(dir)) fail(`--dir ${dir} does not exist`);
+    const opts = {
+      dir,
+      dryRun: Boolean(parsedArgs["dry-run"]),
+      replaceExisting: Boolean(parsedArgs["replace-existing"]),
+      include: list(parsedArgs.include),
+      guardNames: list(parsedArgs["guard-names"]),
+      governingLaw: typeof parsedArgs["governing-law"] === "string" ? parsedArgs["governing-law"] : undefined,
+    };
+    const report = sub === "apply" ? applyLicense(opts) : checkLicense(opts);
+    console.log(formatReport(report, sub, opts.dryRun));
+    if (sub === "check" && report.problems.length) process.exit(1);
   } else if (cmd === "revoke") {
     await revoke(rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined, parsedArgs);
   } else {
