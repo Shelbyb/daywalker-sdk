@@ -1,5 +1,8 @@
 import { assertSecureUrl } from "../config.js";
 import { SDK_VERSION } from "../flags/common/version.js";
+import { startWebVitals, type WebVitalsOptions } from "./web-vitals.js";
+
+export type { WebVitalEvent, WebVitalMetric, WebVitalsOptions, WebVitalsPayload } from "./web-vitals.js";
 
 /**
  * DevPulse product analytics. Works in browsers (automatic page views,
@@ -49,6 +52,12 @@ export type AnalyticsOptions = {
    * If it throws, the path is sent as "/".
    */
   sanitizePath?: (path: string) => string;
+  /**
+   * Measure Web Vitals (LCP, CLS, INP, FCP, TTFB, page load) and send them to `{host}/a/rum` when
+   * the page is hidden (browsers). `true` or options such as `{ sampleRate, release, environment }`.
+   * Skipped when the client is opted out, or Do Not Track / Global Privacy Control is on. Default off.
+   */
+  autocaptureWebVitals?: boolean | WebVitalsOptions;
   fetch?: typeof fetch;
   onError?: (err: Error) => void;
 };
@@ -146,6 +155,8 @@ export class Analytics {
   private lastUrl = "";
   private cleanup: (() => void)[] = [];
   private endpoint: string;
+  private rumEndpoint: string;
+  private stopVitals: (() => void) | undefined;
 
   constructor(options: AnalyticsOptions) {
     if (!options.writeKey) throw new Error("writeKey is required");
@@ -153,11 +164,13 @@ export class Analytics {
     assertSecureUrl("host", options.host);
     this.opts = { flushAt: 20, flushInterval: isBrowser ? 2000 : 10000, maxQueueSize: 1000, sessionTimeoutMinutes: 30, ...options };
     this.endpoint = `${options.host.replace(/\/+$/, "")}/a/batch`;
+    this.rumEndpoint = `${options.host.replace(/\/+$/, "")}/a/rum`;
     this.store = new Store(`dp_analytics_${options.writeKey}`, (options.persistence ?? (isBrowser ? "localStorage" : "memory")) === "localStorage" && isBrowser);
     this.state = this.store.load() ?? { distinctId: uuidv7(), identified: false, props: {} };
     if (options.optedOut !== undefined) this.state.optedOut = options.optedOut;
     this.store.save(this.state);
     if (isBrowser) this.attachBrowser();
+    if (options.autocaptureWebVitals) this.captureWebVitals(options.autocaptureWebVitals === true ? {} : options.autocaptureWebVitals);
   }
 
   // ---------- Public API ----------
@@ -258,6 +271,28 @@ export class Analytics {
     return this.state.session?.id ?? null;
   }
 
+  /**
+   * Measure this page view's Web Vitals and send them to DevPulse (`POST {host}/a/rum`, the write
+   * key as auth) when the page is hidden. Does nothing outside browsers, without PerformanceObserver,
+   * when Do Not Track or Global Privacy Control is on, or when the page view is not sampled; nothing
+   * is sent while the client is opted out. Returns a function that stops measuring. Calling it again
+   * while active returns the same stop function.
+   */
+  captureWebVitals(options: WebVitalsOptions = {}): () => void {
+    if (this.stopVitals) return this.stopVitals;
+    const stop = startWebVitals(
+      { writeKey: this.opts.writeKey, endpoint: this.rumEndpoint, isOptedOut: () => !!this.state.optedOut, sanitizePath: (p) => this.pathOrThrow(p), fetch: this.opts.fetch, onError: this.opts.onError },
+      options,
+    );
+    const stopAndForget = () => {
+      stop();
+      if (this.stopVitals === stopAndForget) this.stopVitals = undefined;
+    };
+    this.stopVitals = stopAndForget;
+    this.cleanup.push(stopAndForget);
+    return stopAndForget;
+  }
+
   /** Send everything queued now. */
   async flush(): Promise<void> {
     clearTimeout(this.timer);
@@ -322,6 +357,10 @@ export class Analytics {
     } catch {
       return this.path(out);
     }
+  }
+
+  private pathOrThrow(p: string): string {
+    return this.opts.sanitizePath ? this.opts.sanitizePath(p) : p;
   }
 
   private path(p: string): string {
