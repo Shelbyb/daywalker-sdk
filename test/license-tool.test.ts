@@ -106,6 +106,19 @@ describe("license apply", () => {
   });
 });
 
+describe("license --exclude", () => {
+  it("skips matching files for apply and check, with * and ** globs", () => {
+    const dir = project({ "package.json": "{}\n", "src/a.ts": 'import "@shelbyb/daywalker-sdk";\n', "src/ui/b.tsx": 'import "@shelbyb/daywalker-sdk";\n', "scripts/c.mjs": 'import "@shelbyb/daywalker-sdk";\n' });
+    const names = (exclude: string[]) => guardFiles({ dir, exclude }).map((f) => path.relative(dir, f).split(path.sep).join("/"));
+    assert.deepEqual(names(["src/ui/**", "scripts/*.mjs"]), ["src/a.ts"]);
+    assert.deepEqual(names(["src/*.ts"]), ["scripts/c.mjs", "src/ui/b.tsx"]);
+    assert.deepEqual(guardFiles({ dir, exclude: ["src/ui/**"], include: ["src/ui/b.tsx"] }).map((f) => path.basename(f)).sort(), ["a.ts", "c.mjs"]);
+    applyLicense({ dir, exclude: ["src/ui/**", "scripts/**"] });
+    assert.ok(!read(dir, "src/ui/b.tsx").includes("Copyright") && read(dir, "src/a.ts").includes("Copyright"));
+    assert.ok(!checkLicense({ dir, exclude: ["src/ui/**", "scripts/**"] }).problems.some((p) => p.includes("b.tsx") || p.includes("c.mjs")));
+  });
+});
+
 describe("license check", () => {
   it("lists what is missing", () => {
     const dir = project(files());
