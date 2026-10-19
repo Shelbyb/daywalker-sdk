@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.17.0
+- **Management API client:** adds the management client, token verification and bundle unsealing helpers (see `/api`).
+
 ## 0.16.2
 - **`daywalker license apply` no longer relicenses packages or reformats `package.json`.** A package that already declares its own `"license"` (for example an MIT CLI in the same monorepo) is left alone and listed, unless `--replace-existing`; `check` reports such packages as a note instead of a failure. The `license` line is inserted as text, so indentation, inline arrays and key order are preserved.
 
