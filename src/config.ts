@@ -81,26 +81,8 @@ export function publicHostname(value: string | undefined | null): string | null 
   return DOMAIN_PATTERN.test(host) ? host : null;
 }
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
-/**
- * Throws unless `value` is an https: URL (http: is allowed only for localhost / 127.0.0.1 / [::1]),
- * so API keys, access tokens, SDK keys and write keys never travel in cleartext.
- */
-export function assertSecureUrl(name: string, value: string): void {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error(`${name} must be an absolute https:// URL (got "${value}")`);
-  }
-  if (url.username || url.password) {
-    throw new Error(`${name} must not contain credentials`);
-  }
-  if (url.protocol === "https:") return;
-  if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) return;
-  throw new Error(`${name} must use https:// (http:// is only allowed for localhost); got "${value}"`);
-}
+export { assertSecureUrl } from "./secure-url.js";
+import { assertSecureUrl } from "./secure-url.js";
 
 /**
  * Service slugs from a comma- or whitespace-separated string (`DAYWALKER_SERVICE_SLUG="gigpulse,devpulse"`)

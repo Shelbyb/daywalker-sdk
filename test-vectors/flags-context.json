@@ -1,0 +1,111 @@
+{
+  "description": "Context parsing. canonicalKey is the key for a single 'user' context, otherwise 'kind:key' pairs sorted by kind and joined with ':' with '%' -> '%25' and ':' -> '%3A' escaped in keys. error=true means the context is invalid (flag evaluation returns the default with reason ERROR/USER_NOT_SPECIFIED; SDKs must not send it).",
+  "version": 1,
+  "cases": [
+    {
+      "context": {
+        "key": "u1"
+      },
+      "canonicalKey": "u1"
+    },
+    {
+      "context": {
+        "kind": "user",
+        "key": "u1",
+        "email": "a@b.c"
+      },
+      "canonicalKey": "u1"
+    },
+    {
+      "context": {
+        "kind": "org",
+        "key": "acme"
+      },
+      "canonicalKey": "org:acme"
+    },
+    {
+      "context": {
+        "kind": "multi",
+        "user": {
+          "key": "u1"
+        },
+        "org": {
+          "key": "acme"
+        }
+      },
+      "canonicalKey": "org:acme:user:u1"
+    },
+    {
+      "context": {
+        "kind": "multi",
+        "org": {
+          "key": "a:b%c"
+        },
+        "device": {
+          "key": "d1"
+        }
+      },
+      "canonicalKey": "device:d1:org:a%3Ab%25c"
+    },
+    {
+      "context": {
+        "kind": "multi",
+        "user": {
+          "key": "u1"
+        }
+      },
+      "canonicalKey": "u1"
+    },
+    {
+      "context": {
+        "kind": "multi"
+      },
+      "error": true
+    },
+    {
+      "context": {
+        "key": ""
+      },
+      "error": true
+    },
+    {
+      "context": {
+        "key": 5
+      },
+      "error": true
+    },
+    {
+      "context": {
+        "kind": "bad kind",
+        "key": "x"
+      },
+      "error": true
+    },
+    {
+      "context": {
+        "kind": "kind",
+        "key": "x"
+      },
+      "error": true
+    },
+    {
+      "context": {
+        "kind": "multi",
+        "user": "nope"
+      },
+      "error": true
+    },
+    {
+      "context": [],
+      "error": true
+    },
+    {
+      "context": null,
+      "error": true
+    },
+    {
+      "context": "str",
+      "error": true
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import type { ContextInput, EvaluationReason, FlagValue } from "./engine/index.js";
 import { EventProcessor, SDK_VERSION, SseClient, encodeContext, noopLogger, type Logger } from "./common/index.js";
-import { assertSecureUrl } from "../config.js";
+import { assertSecureUrl } from "../secure-url.js";
 
 export type { ContextInput, EvaluationReason, FlagValue, Logger };
 export { SDK_VERSION };
