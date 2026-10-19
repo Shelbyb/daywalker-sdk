@@ -10,12 +10,19 @@ import { init } from "../src/flags/node.js";
 import { createAnalytics } from "../src/analytics/index.js";
 import { createApiClient } from "../src/api/index.js";
 import { createClient } from "../src/flags/client.js";
+import { signWebhook, verifyWebhook } from "../src/webhooks/index.js";
+import { createCronMonitor } from "../src/cron/index.js";
+import { createLogger } from "../src/logs/index.js";
+import { fetchSecrets } from "../src/secrets/index.js";
+import { createOncall } from "../src/oncall/index.js";
+import { createSloReporter } from "../src/slo/index.js";
+import { recordDeploy } from "../src/deploys/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as { exports: Record<string, string | { types?: string; import?: string; default?: string }>; sideEffects: boolean };
 
 /** Portable entry points: they must not pull in Node built-ins, directly or transitively. */
-const PORTABLE = ["./flags", "./flags/node", "./flags/react", "./flags/engine", "./openfeature/web", "./analytics", "./api"];
+const PORTABLE = ["./flags", "./flags/node", "./flags/react", "./flags/engine", "./openfeature/web", "./analytics", "./api", "./webhooks", "./cron", "./logs", "./secrets", "./secrets/env", "./oncall", "./slo", "./deploys"];
 
 function srcOf(distPath: string) {
   const p = resolve(root, distPath.replace(/^\.\/dist\//, "src/").replace(/\.js$/, ""));
@@ -68,12 +75,14 @@ describe("runtime compatibility", () => {
       expect(typeof v.default).toBe("string");
       expect(k.startsWith(".")).toBe(true);
     }
-    for (const sub of ["./flags", "./flags/node", "./analytics", "./api"]) expect(sub in pkg.exports).toBe(true);
+    for (const sub of ["./flags", "./flags/node", "./analytics", "./api", "./webhooks", "./cron", "./logs", "./secrets", "./secrets/env", "./oncall", "./slo", "./deploys"]) expect(sub in pkg.exports).toBe(true);
   });
 
-  it("runs with browser/worker globals only (no process, no Buffer)", () => {
+  it("runs with browser/worker globals only (no process, no Buffer)", async () => {
     const g = globalThis as Record<string, unknown>;
     const saved = { process: g.process, Buffer: g.Buffer };
+    // Node loads its fetch internals (undici) lazily, and they need Buffer: load them first.
+    await new Response("warm").text();
     try {
       delete g.Buffer;
       Object.defineProperty(globalThis, "process", { value: undefined, configurable: true, writable: true });
@@ -83,6 +92,22 @@ describe("runtime compatibility", () => {
       const server = init("sdk-key", { baseUrl: "https://dp.example.com", offline: true });
       expect(server.secureModeHash({ key: "u1" })).toBe(createHmac("sha256", "sdk-key").update("u1").digest("hex"));
       server.close?.();
+      // A Response-shaped stub: Node's own Response constructor needs Buffer.
+      const text = JSON.stringify({ secrets: { A: "1" } });
+      const ok = (async () => ({ ok: true, status: 200, headers: new Headers(), body: null, text: async () => text, json: async () => JSON.parse(text) })) as unknown as typeof fetch;
+      const secret = "whsec_" + btoa("k".repeat(32));
+      const body = JSON.stringify({ type: "ping", timestamp: "", data: {} });
+      const headers = { "webhook-id": "m", "webhook-timestamp": "100", "webhook-signature": await signWebhook(secret, "m", 100, body) };
+      expect((await verifyWebhook({ secret, headers, body, now: 100_000 })).type).toBe("ping");
+      expect((await createCronMonitor({ pingUrl: "https://dp.example.com/ping/t", fetch: ok }).success()).ok).toBe(true);
+      const log = createLogger({ host: "https://dp.example.com", token: "dpl_x", fetch: ok, flushIntervalMs: 0 });
+      log.info("hi");
+      await log.shutdown();
+      expect((await fetchSecrets({ host: "https://dp.example.com", token: "dps_x", fetch: ok })).secrets.A).toBe("1");
+      expect(typeof createOncall({ host: "https://dp.example.com", routingKey: "rk_x" }).trigger).toBe("function");
+      const api = { post: async () => ({ data: { id: "d1" } }) } as never;
+      await createSloReporter({ api, project: "p", slo: "s", flushIntervalMs: 0 }).shutdown();
+      expect((await recordDeploy(api, "p", { environment: "production" })).id).toBe("d1");
     } finally {
       Object.defineProperty(globalThis, "process", { value: saved.process, configurable: true, writable: true });
       g.Buffer = saved.Buffer;
