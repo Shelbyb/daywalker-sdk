@@ -189,3 +189,6 @@ Security fixes. Released as a minor version (not 0.2.1) because several changes 
 - `validateToken()` deduplicates concurrent in-flight validations per `serviceSlug:token`.
 - New `negativeCacheTtlMs` config (default 3000ms, 0 disables) briefly caches failed validations; 429 and network errors are never cached.
 - Server (`daywalker-api-service`) already keys replays on the signature hash and signs the raw `Signature-Input` params, so the nonce makes signatures unique; older SDKs without a nonce remain accepted.
+
+## Unreleased
+- Added `createManagementClient` (tokens, logs, keys), `verifyAccessToken`, `unsealBundle`, `createDpopProof`/`generateDpopKey` root exports, typed `service_limits` helpers.

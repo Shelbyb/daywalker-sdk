@@ -1,4 +1,5 @@
 import { parseServiceSlugs, resolveConfig, type ResolvedConfig } from "./config.js";
+import { unsealBundle } from "./management.js";
 import { API_KEY_PATTERN, SAFE_IDENTIFIER_PATTERN, SERVICE_SLUG_PATTERN } from "./crypto/signatures.js";
 import { parseStoredSigningKey } from "./keystore/index.js";
 import {
@@ -1547,16 +1548,7 @@ export class Daywalker {
   #bundles = new Map<string, ConfigBundle>();
 
   async #openBundle(licenseKey: string, sealed: { iv: string; tag: string; ciphertext: string }, slug: string): Promise<ConfigBundle> {
-    const key = await webcrypto.importKey("raw", hexToBytes(licenseKey) as BufferSource, { name: "AES-GCM" }, false, ["decrypt"]);
-    const tag = base64ToBytes(sealed.tag);
-    const data = base64ToBytes(sealed.ciphertext);
-    const joined = new Uint8Array(data.length + tag.length);
-    joined.set(data);
-    joined.set(tag, data.length);
-    const plain = await webcrypto.decrypt({ name: "AES-GCM", iv: base64ToBytes(sealed.iv) as BufferSource, tagLength: 128 }, key, joined as BufferSource);
-    const parsed = JSON.parse(utf8ToString(new Uint8Array(plain))) as ConfigBundle;
-    if (!parsed || typeof parsed !== "object" || parsed.serviceSlug !== slug || typeof parsed.dataKeySalt !== "string") throw new Error("bad bundle");
-    return deepFreeze(parsed);
+    return deepFreeze(await unsealBundle(licenseKey, sealed, slug));
   }
 
   /**
