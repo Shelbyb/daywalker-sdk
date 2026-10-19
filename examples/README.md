@@ -26,3 +26,13 @@ One small, type-checked file per use case. `npm run check:examples` builds the p
 | `@shelbyb/daywalker-sdk/deploys` | [deploys.ts](./deploys.ts) |
 
 A test (`test/examples.test.ts`) fails when a subpath export has no example here.
+
+## Other languages (reference examples)
+
+The SDK itself is Node.js/TypeScript. For Python, Go and Ruby these examples validate a token with an RFC 9421 signed request (same signature base as `test-vectors/signing-rfc9421.json`):
+
+- `python/validate_token.py` (needs `cryptography`)
+- `go/validate_token/main.go` (stdlib)
+- `ruby/validate_token.rb` (stdlib)
+
+Env: `DAYWALKER_API_KEY`, `DAYWALKER_KEY_ID`, `DAYWALKER_SIGNING_KEY` (base64 PKCS#8 Ed25519), optional `DAYWALKER_URL`.
