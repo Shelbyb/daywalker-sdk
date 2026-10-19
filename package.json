@@ -1,6 +1,6 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics) in one package with a single runtime dependency (re2js).",
   "type": "module",
   "main": "./dist/index.js",
@@ -89,6 +89,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --import tsx --test test/*.test.ts",
+    "test:coverage": "npm run build && node --import tsx --test --experimental-test-coverage --test-coverage-include=src/analytics/web-vitals.ts --test-coverage-lines=90 --test-coverage-branches=90 --test-coverage-functions=90 test/*.test.ts",
     "lint:package": "publint --strict && attw --pack . --profile esm-only",
     "prepublishOnly": "npm test"
   },

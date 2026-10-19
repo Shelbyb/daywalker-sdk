@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0
+- Analytics client: Web Vitals capture. New `analytics.captureWebVitals(options?)` (returns a stop function) and `autocaptureWebVitals` constructor option measure LCP, CLS (session windows), INP, FCP, TTFB and page load and send them to DevPulse's `POST {host}/a/rum` with `sendBeacon` (fetch `keepalive` fallback) on page hide. Options: `sampleRate`, `release`, `environment`, `path`. Respects `optedOut`/`optOut()`, Do Not Track and Global Privacy Control; no-op outside browsers or without `PerformanceObserver`.
+- New exported types `WebVitalsOptions`, `WebVitalMetric`, `WebVitalEvent`, `WebVitalsPayload`.
+- New `npm run test:coverage` (node's built-in coverage, 90% lines/branches/functions threshold on `src/analytics/web-vitals.ts`), now a CI step.
+- No new runtime dependencies. Existing behavior is unchanged.
+
 ## 0.10.0
 - New `daywalker onboard` command: sign up or log in, verify the email, choose a service from the live `GET /api/v1/services` list, give the public app URL, create an API token (allowed origins: the URL plus the project's local origins, default `https://localhost:3000`), and register a signing key in-process (same as `init`). Resumable through a gitignored `.daywalker-onboard.json` that never holds the password, token or keys. Flags: `--service`, `--url`, `--name`, `--email`, `--existing-account`, `--dry-run`, `--yes`.
 - Optional project extension `daywalker.onboard.mjs` (confirmation required, `--yes` trusts it): extra env prompts, generated and fixed values, `mirrorTo`, `localOrigins`, `defaultService` and `nextSteps`. `DAYWALKER_*` keys are reserved, and values go through the same safety check as `.env.local` writes.

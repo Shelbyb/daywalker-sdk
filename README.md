@@ -524,6 +524,31 @@ const flags = createClient(clientSideId, { kind: "user", key: user.id }, { baseU
 const analytics = createAnalytics({ writeKey: "dpa_…", host: "https://devpulse.example.com", flags }); // events carry $feature/<key>
 ```
 
+### Web Vitals
+
+The analytics client can report real-user performance to DevPulse's **Web Vitals** dashboard: **LCP**, **CLS** (largest session window), **INP** (event timing), **FCP**, **TTFB** and page load, measured with `PerformanceObserver` and navigation timing. Metrics are sent to `POST {host}/a/rum` with your analytics write key, using `navigator.sendBeacon` (falling back to `fetch` with `keepalive`) when the page is hidden or unloaded. CLS and INP are re-sent if they grow; a back/forward-cache restore starts a new page view.
+
+```ts
+import { createAnalytics } from "@shelbyb/daywalker-sdk/analytics";
+
+const analytics = createAnalytics({
+  writeKey: "dpa_…",
+  host: "https://devpulse.example.com",
+  autocaptureWebVitals: { sampleRate: 0.5, release: "1.4.2", environment: "production" },
+});
+// or start it yourself; the returned function stops measuring
+const stop = analytics.captureWebVitals({ sampleRate: 0.5 });
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `sampleRate` | `1` | Share of page views to measure (0 to 1), decided once per page view |
+| `release` | none | Release or version string (`[A-Za-z0-9_.+@/:~-]`, up to 100 characters) |
+| `environment` | none | e.g. `production` (`[A-Za-z0-9_.-]`, up to 64 characters) |
+| `path` | `location.pathname` | Report this page instead, e.g. a route pattern like `/users/:id` |
+
+**Privacy.** Nothing is measured when Do Not Track or Global Privacy Control is on, and nothing is sent while the client is opted out (`optedOut`, `optOut()`); metrics held back are sent after `optIn()`. Only the page path is sent (never the query string or fragment, and your `sanitizePath` applies), the server collapses ids in paths, and no cookies or storage are used. It does nothing outside browsers or where `PerformanceObserver` is missing. See the [DevPulse Web Vitals docs](https://github.com/Shelbyb/DevPulse/blob/main/docs/RUM.md) for the payload, ratings and dashboard.
+
 ---
 
 ## Provenance & Releases
