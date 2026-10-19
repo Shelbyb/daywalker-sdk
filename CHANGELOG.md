@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.16.1
+- `daywalker license apply|check --exclude <glob,…>`: leave files alone (for example UI files that only show SDK snippets, or an integrity script), so `check` doesn't flag them either.
+
 ## 0.16.0
 - **`daywalker license apply|check`:** installs and verifies the DevPulse source-available license in a project: `LICENSE`, `"license": "SEE LICENSE IN LICENSE"` in `package.json` (root and workspaces; `"private"` is never changed), a README section, a notice header on every file that imports the SDK or calls its guards, and the boot log line (added to Next.js `instrumentation.ts` when present). Idempotent, `--dry-run`, and `check` exits non-zero for CI. Comments and metadata only; it never edits code that calls the SDK. See `docs/license.md`.
 - The bundled license text is a reviewed redraft (defined terms, no circumvention, tiers, redistribution, patents, trademarks, termination with cure); governing law is an owner decision (`--governing-law`).
