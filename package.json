@@ -1,7 +1,8 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics, Web Vitals, management API client) in one package with a single runtime dependency (re2js).",
+  "license": "UNLICENSED",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -149,7 +150,6 @@
     "type": "git",
     "url": "git+https://github.com/Shelbyb/daywalker-sdk.git"
   },
-  "license": "MIT",
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
     "@openfeature/core": "^1.12.0",

@@ -1,21 +1,28 @@
-MIT License
+PROPRIETARY AND CONFIDENTIAL SOFTWARE LICENSE
+@shelbyb/daywalker-sdk
 
-Copyright (c) 2026 Shelby Brayton
+Copyright (c) 2026 Shelby Thomas Brayton Jr. / Shelby Tech LLC. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. GRANT OF LICENSE:
+   Subject to the terms herein, you are granted a limited, revocable, non-exclusive,
+   non-transferable, and royalty-free right to download, install, and execute this
+   SDK solely as a dependency within supported applications to communicate with the
+   Daywalker licensing and rate-limiting infrastructure.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+2. RESTRICTIONS:
+   Except as explicitly permitted above, you may NOT:
+   a) Decompile, reverse engineer, disassemble, modify, or create derivative works
+      of this SDK.
+   b) Bypass, disable, tamper with, or circumvent any rate-limiting, authentication,
+      or licensing verification mechanisms provided by this SDK.
+   c) Redistribute, re-license, sell, lease, or republish this SDK as an independent
+      package or under another namespace.
+
+3. CONTRIBUTIONS:
+   Modifications to the official codebase may only be submitted via pull request to
+   the official repository and remain subject to the sole approval and copyright of
+   the copyright holder.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+IMPLIED. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES,
+OR OTHER LIABILITY ARISING OUT OF THE USE OF THIS SOFTWARE.
