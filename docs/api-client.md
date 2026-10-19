@@ -32,3 +32,5 @@ try {
 * **Safety**: `host` must be HTTPS (or localhost), paths must be relative to the host, redirects are an error, each attempt has a timeout (`timeoutMs`, 30 s) and accepts an `AbortSignal`.
 
 Responses are `{ status, data, headers, etag, rateLimit, next }`.
+
+Examples: [`examples/`](../examples/README.md).
