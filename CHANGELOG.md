@@ -6,6 +6,11 @@
 - New `npm run test:coverage` (node's built-in coverage, 90% lines/branches/functions threshold on `src/analytics/web-vitals.ts`), now a CI step.
 - No new runtime dependencies. Existing behavior is unchanged.
 
+## 0.12.0
+- **Management API client:** new `@shelbyb/daywalker-sdk/api` (`createApiClient`): OAuth 2.0 client credentials with cached, early-refreshed tokens, bearer requests, typed RFC 9457 `ApiProblemError`, `paginate()`/`pages()` over RFC 8288 `Link rel="next"` (never to another origin), retries on 429/503 honoring `Retry-After`, `If-Match`/ETag, IETF RateLimit parsing. HTTPS-only (except localhost); credentials never appear in URLs.
+- **Runtimes:** `/flags/node` no longer imports `node:crypto` or `node:events` (pure JavaScript SHA-256/HMAC and a small event emitter, same API), and the flags, analytics and API entry points no longer pull in the Daywalker auth module, so they work on Deno, Bun, Cloudflare Workers and browsers. New `./package.json` export. A test fails if a portable entry point imports a Node built-in.
+- **Docs and vectors:** `docs/protocol.md` (language-neutral wire contract), `docs/web-vitals.md`, `docs/api-client.md`, `docs/runtimes.md`; new conformance vectors `test-vectors/flags-bucketing.json`, `flags-context.json`, `flags-operators.json` and `secure-mode-hash.json` next to `flags-eval.json`.
+
 ## 0.10.0
 - New `daywalker onboard` command: sign up or log in, verify the email, choose a service from the live `GET /api/v1/services` list, give the public app URL, create an API token (allowed origins: the URL plus the project's local origins, default `https://localhost:3000`), and register a signing key in-process (same as `init`). Resumable through a gitignored `.daywalker-onboard.json` that never holds the password, token or keys. Flags: `--service`, `--url`, `--name`, `--email`, `--existing-account`, `--dry-run`, `--yes`.
 - Optional project extension `daywalker.onboard.mjs` (confirmation required, `--yes` trusts it): extra env prompts, generated and fixed values, `mirrorTo`, `localOrigins`, `defaultService` and `nextSteps`. `DAYWALKER_*` keys are reserved, and values go through the same safety check as `.env.local` writes.

@@ -1,4 +1,4 @@
-import { assertSecureUrl } from "../config.js";
+import { assertSecureUrl } from "../secure-url.js";
 import { SDK_VERSION } from "../flags/common/version.js";
 import { startWebVitals, type WebVitalsOptions } from "./web-vitals.js";
 
@@ -523,3 +523,4 @@ function referringDomain(ref: string): string | undefined {
 export function createAnalytics(options: AnalyticsOptions) {
   return new Analytics(options);
 }
+

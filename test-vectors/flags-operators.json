@@ -1,0 +1,290 @@
+{
+  "description": "Clause operators applied to one context value (actual) and one clause value (expected). Type mismatches never match. 'matches' uses RE2 syntax (no lookaround/backreferences: never match), patterns over 500 chars and inputs over 1024 chars never match, and matching is unanchored. 'before'/'after' accept RFC 3339 strings (with offset or Z) or Unix milliseconds. Semver: optional v prefix, minor/patch default to 0, build metadata ignored, pre-release lower than release. The negate flag and list semantics (any actual x any expected) are applied by the evaluator, not here.",
+  "version": 1,
+  "cases": [
+    {
+      "op": "in",
+      "actual": "a",
+      "expected": "a",
+      "result": true
+    },
+    {
+      "op": "in",
+      "actual": "a",
+      "expected": "b",
+      "result": false
+    },
+    {
+      "op": "in",
+      "actual": 1,
+      "expected": 1,
+      "result": true
+    },
+    {
+      "op": "in",
+      "actual": 1,
+      "expected": "1",
+      "result": false
+    },
+    {
+      "op": "in",
+      "actual": true,
+      "expected": true,
+      "result": true
+    },
+    {
+      "op": "in",
+      "actual": [
+        1
+      ],
+      "expected": [
+        1
+      ],
+      "result": true
+    },
+    {
+      "op": "in",
+      "actual": {
+        "a": 1
+      },
+      "expected": {
+        "a": 1
+      },
+      "result": true
+    },
+    {
+      "op": "in",
+      "actual": null,
+      "expected": null,
+      "result": true
+    },
+    {
+      "op": "startsWith",
+      "actual": "hello",
+      "expected": "he",
+      "result": true
+    },
+    {
+      "op": "startsWith",
+      "actual": "hello",
+      "expected": "lo",
+      "result": false
+    },
+    {
+      "op": "startsWith",
+      "actual": 5,
+      "expected": "5",
+      "result": false
+    },
+    {
+      "op": "endsWith",
+      "actual": "hello",
+      "expected": "lo",
+      "result": true
+    },
+    {
+      "op": "endsWith",
+      "actual": "hello",
+      "expected": "he",
+      "result": false
+    },
+    {
+      "op": "contains",
+      "actual": "hello",
+      "expected": "ell",
+      "result": true
+    },
+    {
+      "op": "contains",
+      "actual": "hello",
+      "expected": "z",
+      "result": false
+    },
+    {
+      "op": "contains",
+      "actual": "hello",
+      "expected": 5,
+      "result": false
+    },
+    {
+      "op": "matches",
+      "actual": "jane@acme.com",
+      "expected": "^[a-z]+@acme\\.com$",
+      "result": true
+    },
+    {
+      "op": "matches",
+      "actual": "x",
+      "expected": "(?i)X",
+      "result": true
+    },
+    {
+      "op": "matches",
+      "actual": "aa",
+      "expected": "^(a)\\1$",
+      "result": false
+    },
+    {
+      "op": "matches",
+      "actual": "ab",
+      "expected": "(?=a)a",
+      "result": false
+    },
+    {
+      "op": "matches",
+      "actual": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected": "a",
+      "result": false
+    },
+    {
+      "op": "matches",
+      "actual": "a",
+      "expected": "[unclosed",
+      "result": false
+    },
+    {
+      "op": "matches",
+      "actual": "acme",
+      "expected": "acme",
+      "result": true
+    },
+    {
+      "op": "matches",
+      "actual": "a",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "result": false
+    },
+    {
+      "op": "lessThan",
+      "actual": 1,
+      "expected": 2,
+      "result": true
+    },
+    {
+      "op": "lessThan",
+      "actual": 2,
+      "expected": 2,
+      "result": false
+    },
+    {
+      "op": "lessThanOrEqual",
+      "actual": 2,
+      "expected": 2,
+      "result": true
+    },
+    {
+      "op": "greaterThan",
+      "actual": 3,
+      "expected": 2,
+      "result": true
+    },
+    {
+      "op": "greaterThanOrEqual",
+      "actual": 2,
+      "expected": 2,
+      "result": true
+    },
+    {
+      "op": "greaterThan",
+      "actual": "3",
+      "expected": 2,
+      "result": false
+    },
+    {
+      "op": "lessThan",
+      "actual": 1.5,
+      "expected": 2,
+      "result": true
+    },
+    {
+      "op": "before",
+      "actual": "2024-01-01T00:00:00Z",
+      "expected": "2025-01-01T00:00:00Z",
+      "result": true
+    },
+    {
+      "op": "after",
+      "actual": "2024-01-01T00:00:00Z",
+      "expected": "2025-01-01T00:00:00Z",
+      "result": false
+    },
+    {
+      "op": "before",
+      "actual": 1000,
+      "expected": 2000,
+      "result": true
+    },
+    {
+      "op": "before",
+      "actual": "2024-01-01",
+      "expected": "2025-01-01T00:00:00Z",
+      "result": false
+    },
+    {
+      "op": "after",
+      "actual": "2025-06-01T12:00:00+02:00",
+      "expected": "2025-06-01T09:00:00Z",
+      "result": true
+    },
+    {
+      "op": "semVerEqual",
+      "actual": "1.2.3",
+      "expected": "1.2.3",
+      "result": true
+    },
+    {
+      "op": "semVerEqual",
+      "actual": "1.2",
+      "expected": "1.2.0",
+      "result": true
+    },
+    {
+      "op": "semVerEqual",
+      "actual": "v1.2.3+build5",
+      "expected": "1.2.3",
+      "result": true
+    },
+    {
+      "op": "semVerLessThan",
+      "actual": "1.2.3-alpha",
+      "expected": "1.2.3",
+      "result": true
+    },
+    {
+      "op": "semVerLessThan",
+      "actual": "1.2.3-alpha.1",
+      "expected": "1.2.3-alpha.2",
+      "result": true
+    },
+    {
+      "op": "semVerGreaterThan",
+      "actual": "1.10.0",
+      "expected": "1.9.0",
+      "result": true
+    },
+    {
+      "op": "semVerGreaterThan",
+      "actual": "1.0.0-beta.11",
+      "expected": "1.0.0-beta.2",
+      "result": true
+    },
+    {
+      "op": "semVerGreaterThan",
+      "actual": "1.0.0-rc.1",
+      "expected": "1.0.0-beta.11",
+      "result": true
+    },
+    {
+      "op": "semVerEqual",
+      "actual": "not-a-version",
+      "expected": "1.0.0",
+      "result": false
+    },
+    {
+      "op": "semVerLessThan",
+      "actual": 1,
+      "expected": "2.0.0",
+      "result": false
+    }
+  ]
+}

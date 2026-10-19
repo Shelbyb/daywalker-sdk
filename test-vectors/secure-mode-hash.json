@@ -1,0 +1,46 @@
+{
+  "description": "Secure mode: hash = lowercase hex HMAC-SHA256(key = server SDK key as UTF-8, message = canonicalKey as UTF-8). Sent as ?h=<hash> on client-side flag requests.",
+  "version": 1,
+  "cases": [
+    {
+      "sdkKey": "sdk-key-1",
+      "canonicalKey": "u1",
+      "hash": "a32397d270d4c5afbb576810836b90afea3bd5541c473c58093adfafd61bf7a3"
+    },
+    {
+      "sdkKey": "sdk-key-1",
+      "canonicalKey": "user:42",
+      "hash": "a1071d1afbeba5caf584288867879d65362bac893dcfb76e91350827112a876a"
+    },
+    {
+      "sdkKey": "sdk-key-1",
+      "canonicalKey": "org:acme:user:u1",
+      "hash": "9811878945d187ce2607f54f703a6ab11c9c393082509c01289ac0936b519c75"
+    },
+    {
+      "sdkKey": "sdk-key-1",
+      "canonicalKey": "ünï",
+      "hash": "a1722df22567629a061238719e64168b276a7a8d92e4a53c18c537e84395b2da"
+    },
+    {
+      "sdkKey": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "canonicalKey": "u1",
+      "hash": "1ab4c054c602cefbe4a70f027505a1e96e964b2e29dbd21036e23d40edc3d3bc"
+    },
+    {
+      "sdkKey": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "canonicalKey": "user:42",
+      "hash": "b98eb363eae57d9c91938c603ec77885665b465fdfc30eaa3d27306bb315573e"
+    },
+    {
+      "sdkKey": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "canonicalKey": "org:acme:user:u1",
+      "hash": "7f241866efb33f2293f598a35d84e724e477da4786f0c2fc34de86c08ff8ccc3"
+    },
+    {
+      "sdkKey": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "canonicalKey": "ünï",
+      "hash": "894cdf7ecc26091fcc9c6b3670c184c4684e173cde8c8b016722fae182f3db33"
+    }
+  ]
+}
