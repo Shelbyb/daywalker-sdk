@@ -101,29 +101,35 @@ function workspaceDirs(dir: string, root: { workspaces?: string[] | { packages?:
   return out.filter((d) => fs.existsSync(path.join(d, "package.json")));
 }
 
+const OUR_LICENSE = "SEE LICENSE IN LICENSE";
+const LICENSE_LINE = /^(\s*)"license"\s*:\s*"([^"]*)"(,?)\s*$/m;
+
+/** Edits package.json as text so formatting and key order stay exactly as they were. */
+function setLicenseField(raw: string): string | null {
+  const existing = LICENSE_LINE.exec(raw);
+  if (existing) return raw.replace(LICENSE_LINE, `$1"license": "${OUR_LICENSE}"$3`);
+  const anchor = /^(\s*)"private"\s*:\s*(?:true|false)(,?)\s*$/m.exec(raw) ?? /^(\s*)"name"\s*:\s*"[^"]*"(,?)\s*$/m.exec(raw);
+  if (!anchor || !anchor[2]) return null; // single-line or unusual layout: caller falls back to a rewrite
+  const line = `${anchor[1]}"license": "${OUR_LICENSE}",`;
+  return raw.replace(anchor[0], `${anchor[0]}\n${line}`);
+}
+
 function applyPackageJson(file: string, opts: LicenseOptions, report: LicenseReport) {
   const raw = read(file);
   const pkg = JSON.parse(raw) as Record<string, unknown>;
-  if (pkg.license === "SEE LICENSE IN LICENSE") {
-    report.unchanged.push(rel(opts.dir, file));
+  const name = rel(opts.dir, file);
+  if (pkg.license === OUR_LICENSE) {
+    report.unchanged.push(name);
+  } else if (typeof pkg.license === "string" && pkg.license && !opts.replaceExisting) {
+    // Never relicense a package that declares its own terms (for example an MIT CLI published from the same repo).
+    report.todo.push(`${name} declares "license": "${pkg.license}"; left as is. Re-run with --replace-existing if this package should use the DevPulse license too.`);
   } else {
-    // Insert after "private"/"version"/"name" when present so the diff stays small; otherwise append.
-    const indent = /^(\s+)"/m.exec(raw)?.[1] ?? "  ";
-    const next: Record<string, unknown> = {};
-    let placed = false;
-    for (const [k, v] of Object.entries(pkg)) {
-      if (k === "license") continue;
-      next[k] = v;
-      if (!placed && k === "private") {
-        next.license = "SEE LICENSE IN LICENSE";
-        placed = true;
-      }
-    }
-    if (!placed) next.license = "SEE LICENSE IN LICENSE";
-    report.changed.push(rel(opts.dir, file));
-    if (!opts.dryRun) fs.writeFileSync(file, `${JSON.stringify(next, null, indent)}\n`);
+    let next = setLicenseField(raw);
+    if (next === null) next = `${JSON.stringify({ ...pkg, license: OUR_LICENSE }, null, /^(\s+)"/m.exec(raw)?.[1] ?? "  ")}\n`;
+    report.changed.push(name);
+    if (!opts.dryRun) fs.writeFileSync(file, next);
   }
-  if (pkg.private === true) report.todo.push(`${rel(opts.dir, file)} is "private": true; left as is (set it to false yourself only if this package is meant to be published).`);
+  if (pkg.private === true) report.todo.push(`${name} is "private": true; left as is (set it to false yourself only if this package is meant to be published).`);
 }
 
 // ---------- README ----------
@@ -280,7 +286,12 @@ export function checkLicense(opts: LicenseOptions): LicenseReport {
   const rootPkg = path.join(opts.dir, "package.json");
   if (fs.existsSync(rootPkg)) {
     const pkgs = [rootPkg, ...workspaceDirs(opts.dir, JSON.parse(read(rootPkg))).map((d) => path.join(d, "package.json"))];
-    for (const p of pkgs) if ((JSON.parse(read(p)) as { license?: string }).license !== "SEE LICENSE IN LICENSE") report.problems.push(`${rel(opts.dir, p)}: "license" is not "SEE LICENSE IN LICENSE"`);
+    for (const p of pkgs) {
+      const declared = (JSON.parse(read(p)) as { license?: string }).license;
+      if (declared === OUR_LICENSE) continue;
+      if (declared) report.todo.push(`${rel(opts.dir, p)} declares "license": "${declared}" (its own terms; not checked).`);
+      else report.problems.push(`${rel(opts.dir, p)}: "license" is missing`);
+    }
   }
   const readme = ["README.md", "readme.md", "Readme.md"].map((f) => path.join(opts.dir, f)).find((f) => fs.existsSync(f));
   if (!readme || !read(readme).includes(README_SECTION.trim())) report.problems.push("README.md is missing the current License section");
