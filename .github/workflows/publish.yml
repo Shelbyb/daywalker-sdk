@@ -115,4 +115,4 @@ jobs:
       # Provenance still links the release to this repository, workflow and commit.
       - env:
           TARBALL: ${{ needs.build.outputs.tarball }}
-        run: npm publish "./$TARBALL" --access public --provenance
+        run: npm publish "./$TARBALL" --access public --provenance --tag latest
