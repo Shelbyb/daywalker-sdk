@@ -52,3 +52,5 @@ Single kind: `{ kind: "user", key: "u1", plan: "pro" }`. Multi-kind: `{ kind: "m
 ## API
 
 `variation(key, default)`, `variationDetail(key, default)`, `boolVariation` / `stringVariation` / `numberVariation` / `jsonVariation`, `allFlags()`, `identify(context)`, `track(key, data?, metricValue?)`, `on("ready" | "failed" | "change" | "change:<key>" | "stale" | "recovered", fn)` (`stale`: the stream dropped and the last flags keep serving; `recovered`: it reconnected), `flush()`, `close()`.
+
+Examples: [`examples/`](../examples/README.md).

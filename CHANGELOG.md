@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.0
+- **New DevPulse clients**, all fetch/WebCrypto only (Node, Deno, Bun, Workers, browsers where it makes sense), HTTPS-only except localhost, credentials only in headers or bodies, redirects refused, sizes capped to DevPulse's limits:
+  - `/webhooks`: `verifyWebhook()` for Standard Webhooks signatures (`whsec_` secrets, 5 minute tolerance, constant-time compare, multiple signatures, secret rotation), typed `WebhookEvent`, `signWebhook()`, `isEventType()`. Conformance vectors in `test-vectors/webhooks-standard.json`.
+  - `/cron`: `createCronMonitor({ pingUrl })` with `start`/`success`/`fail`/`log`/`exitCode` and `wrap(fn)`; bodies capped at 10,000 characters; pings never throw.
+  - `/logs`: `createLogger()` with levels, attributes, child loggers, batching, retries, `flush()`/`shutdown()`, DevPulse size limits, `consoleAdapter()` and `pinoDestination()`.
+  - `/secrets`: `fetchSecrets()`, `fetchDotenv()`, `parseDotenv()` with `dps_` service tokens; `/secrets/env`: `loadSecrets()` into `process.env` (existing values win).
+  - `/oncall`: Events API v2 `trigger`/`acknowledge`/`resolve` with dedup keys.
+  - `/slo`: `createSloReporter()` (per-minute aggregation, each batch sent once since events are not idempotent) and `pushSloEvents()`; `/deploys`: `recordDeploy()`. Both use the `/api` client.
+- **Examples:** `examples/` has a type-checked example for every subpath export; `npm run check:examples` compiles them (CI step), and a test fails when an export has no example.
+- `test:coverage` now also covers the new modules (90% threshold). `test/runtime-compat.test.ts` covers the new entry points.
+- No new runtime dependencies. Existing behavior is unchanged.
+
 ## 0.11.0
 - Analytics client: Web Vitals capture. New `analytics.captureWebVitals(options?)` (returns a stop function) and `autocaptureWebVitals` constructor option measure LCP, CLS (session windows), INP, FCP, TTFB and page load and send them to DevPulse's `POST {host}/a/rum` with `sendBeacon` (fetch `keepalive` fallback) on page hide. Options: `sampleRate`, `release`, `environment`, `path`. Respects `optedOut`/`optOut()`, Do Not Track and Global Privacy Control; no-op outside browsers or without `PerformanceObserver`.
 - New exported types `WebVitalsOptions`, `WebVitalMetric`, `WebVitalEvent`, `WebVitalsPayload`.
