@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { applyLicense, checkLicense, formatReport, guardFiles, BOOT_NOTICE, HEADER_COMMENT, LICENSE_TEXT } from "../src/license/index.js";
+import { applyLicense, checkLicense, formatReport, guardFiles, BOOT_NOTICE, DEFAULT_GOVERNING_LAW, HEADER_COMMENT, LICENSE_TEXT } from "../src/license/index.js";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const TSX = import.meta.resolve("tsx");
@@ -19,6 +19,7 @@ function project(files: Record<string, string>) {
   return dir;
 }
 const read = (dir: string, f: string) => fs.readFileSync(path.join(dir, f), "utf8");
+const flat = (text: string) => text.replace(/\s+/g, " ");
 
 const files = () => ({
   "package.json": JSON.stringify({ name: "root", private: true, workspaces: ["apps/*"], version: "1.0.0" }, null, 2) + "\n",
@@ -38,11 +39,12 @@ describe("license apply", () => {
   it("installs everything, changes nothing it should not, and is idempotent", () => {
     const dir = project(files());
     const r = applyLicense({ dir, governingLaw: "the State of Delaware, USA" });
-    assert.ok(read(dir, "LICENSE").includes("the State of Delaware, USA, excluding its conflict-of-laws rules"));
+    assert.ok(flat(read(dir, "LICENSE")).includes("governed by the laws of the State of Delaware, USA, excluding its conflict-of-laws rules"));
     assert.equal(JSON.parse(read(dir, "package.json")).license, "SEE LICENSE IN LICENSE");
     assert.equal(JSON.parse(read(dir, "package.json")).private, true, "private is never changed");
     assert.equal(JSON.parse(read(dir, "apps/web/package.json")).license, "SEE LICENSE IN LICENSE");
     assert.ok(r.todo.some((t) => t.includes("package.json is \"private\": true")));
+    assert.ok(!read(dir, "LICENSE").includes(DEFAULT_GOVERNING_LAW), "an explicit governing law replaces the default");
     // README: after the first prose paragraph, before ## Usage
     const readme = read(dir, "README.md");
     assert.ok(readme.indexOf("## License") > readme.indexOf("A demo app.") && readme.indexOf("## License") < readme.indexOf("## Usage"));
@@ -79,7 +81,7 @@ describe("license apply", () => {
     applyLicense({ dir, replaceExisting: true, governingLaw: "England and Wales" });
     assert.ok(read(dir, "LICENSE").startsWith(LICENSE_TEXT.split("\n")[0]));
     applyLicense({ dir }); // no flag: the earlier choice stays
-    assert.ok(read(dir, "LICENSE").includes("England and Wales, excluding"));
+    assert.ok(flat(read(dir, "LICENSE")).includes("England and Wales, excluding"));
   });
 
   it("replaces an existing License section and handles a README without a paragraph", () => {
@@ -162,13 +164,20 @@ describe("license check", () => {
     assert.ok(text.includes("guard.ts: missing"));
   });
 
-  it("flags the governing-law placeholder as a to-do, not a failure", () => {
+  it("defaults to North Carolina with the injunctive-relief paragraph, and accepts a changed governing law", () => {
     const dir = project(files());
-    applyLicense({ dir });
-    const r = checkLicense({ dir });
-    assert.deepEqual(r.problems, []);
-    assert.ok(r.todo.some((t) => t.includes("governing-law")));
-    assert.ok(formatReport(r, "check").includes("complete"));
+    const r = applyLicense({ dir });
+    const text = read(dir, "LICENSE");
+    assert.ok(flat(text).includes(`governed by the laws of ${DEFAULT_GOVERNING_LAW}, excluding its conflict-of-laws rules`));
+    assert.ok(text.includes("Injunctive relief anywhere."));
+    assert.ok(!r.todo.some((t) => t.includes("governing")), "no governing-law to-do: there is a default");
+    const c = checkLicense({ dir });
+    assert.deepEqual(c.problems, []);
+    assert.ok(formatReport(c, "check").includes("complete"));
+    applyLicense({ dir, governingLaw: "Utah" });
+    assert.deepEqual(checkLicense({ dir }).problems, [], "a deliberately changed law is not a failure");
+    applyLicense({ dir }); // re-running without the flag keeps the choice
+    assert.ok(flat(read(dir, "LICENSE")).includes("governed by the laws of Utah, excluding"));
   });
 });
 
