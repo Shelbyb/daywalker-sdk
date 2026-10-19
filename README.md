@@ -516,8 +516,16 @@ The same package ships the [DevPulse](https://github.com/shelbyb/devpulse) clien
 | `@shelbyb/daywalker-sdk/openfeature/server`, `/openfeature/web` | OpenFeature providers | [docs/openfeature.md](./docs/openfeature.md) |
 | `@shelbyb/daywalker-sdk/analytics` | Product analytics: events, page views, identify, sessions (browser and Node), plus `captureWebVitals()` | [docs/analytics.md](./docs/analytics.md) |
 | `@shelbyb/daywalker-sdk/api` | Typed management REST API client: OAuth client credentials, RFC 9457 errors, Link pagination, retries | [docs/api-client.md](./docs/api-client.md) |
+| `@shelbyb/daywalker-sdk/webhooks` | Verify DevPulse webhooks (Standard Webhooks signatures, typed events) | [docs/webhooks.md](./docs/webhooks.md) |
+| `@shelbyb/daywalker-sdk/cron` | Cron check pings: start, success, fail, log, exit code, `wrap(fn)` | [docs/cron.md](./docs/cron.md) |
+| `@shelbyb/daywalker-sdk/logs` | Batched structured log shipping, console and pino adapters | [docs/logs.md](./docs/logs.md) |
+| `@shelbyb/daywalker-sdk/secrets`, `/secrets/env` | Runtime secrets fetch with a `dps_` service token; Node `process.env` loader | [docs/secrets.md](./docs/secrets.md) |
+| `@shelbyb/daywalker-sdk/oncall` | On-call Events API v2: trigger, acknowledge, resolve | [docs/oncall.md](./docs/oncall.md) |
+| `@shelbyb/daywalker-sdk/slo`, `/deploys` | Push SLO good/total events; record deploy markers | [docs/slo-deploys.md](./docs/slo-deploys.md) |
 
-The flags, analytics and API entry points run unchanged in browsers, Node, Deno, Bun and Cloudflare Workers ([docs/runtimes.md](./docs/runtimes.md)). Writing an SDK for another language? See the wire contract in [docs/protocol.md](./docs/protocol.md) and the JSON conformance vectors in `test-vectors/`.
+Runnable, type-checked examples for every import above (and the Daywalker auth entry points) are in [`examples/`](./examples/README.md).
+
+The flags, analytics, API, webhooks, cron, logs, secrets, on-call, SLO and deploys entry points run unchanged in browsers, Node, Deno, Bun and Cloudflare Workers ([docs/runtimes.md](./docs/runtimes.md)). Writing an SDK for another language? See the wire contract in [docs/protocol.md](./docs/protocol.md) and the JSON conformance vectors in `test-vectors/`.
 
 ```ts
 import { createClient } from "@shelbyb/daywalker-sdk/flags";

@@ -28,3 +28,5 @@ OpenFeature.getClient().getBooleanValue("new-checkout", false);
 ```
 
 `targetingKey` maps to the context key, and a `kind` attribute selects the context kind (default `user`). Flag changes emit `PROVIDER_CONFIGURATION_CHANGED`. Reasons map to OpenFeature's standard reasons: `TARGETING_MATCH`, `SPLIT`, `DEFAULT`, `DISABLED`, `ERROR`.
+
+Examples: [`examples/`](../examples/README.md).
