@@ -106,6 +106,30 @@ describe("license apply", () => {
   });
 });
 
+describe("license package.json handling", () => {
+  it("keeps formatting and key order, and never overwrites another declared license", () => {
+    const original = '{\n  "name": "cli",\n  "version": "0.1.0",\n  "license": "MIT",\n  "bin": { "x": "./x.js" },\n  "files": ["dist", "README.md"]\n}\n';
+    const dir = project({ "package.json": '{\n  "name": "root",\n  "private": true,\n  "workspaces": ["packages/*"]\n}\n', "packages/cli/package.json": original, "packages/web/package.json": '{\n  "name": "web",\n  "version": "1.0.0",\n  "bin": { "w": "./w.js" }\n}\n' });
+    const r = applyLicense({ dir });
+    assert.equal(read(dir, "packages/cli/package.json"), original, "MIT stays, bytes unchanged");
+    assert.ok(r.todo.some((t) => t.includes('declares "license": "MIT"')));
+    assert.equal(read(dir, "package.json"), '{\n  "name": "root",\n  "private": true,\n  "license": "SEE LICENSE IN LICENSE",\n  "workspaces": ["packages/*"]\n}\n');
+    assert.equal(read(dir, "packages/web/package.json"), '{\n  "name": "web",\n  "license": "SEE LICENSE IN LICENSE",\n  "version": "1.0.0",\n  "bin": { "w": "./w.js" }\n}\n');
+    const c = checkLicense({ dir });
+    assert.ok(!c.problems.some((p) => p.includes("packages/cli")), "an MIT package is a note, not a failure");
+    assert.ok(c.todo.some((t) => t.includes("packages/cli/package.json declares")));
+    applyLicense({ dir, replaceExisting: true });
+    assert.equal(JSON.parse(read(dir, "packages/cli/package.json")).license, "SEE LICENSE IN LICENSE");
+    assert.ok(read(dir, "packages/cli/package.json").includes('"bin": { "x": "./x.js" }'), "formatting survives a replacement");
+  });
+
+  it("falls back to a rewrite for single-line package.json", () => {
+    const dir = project({ "package.json": '{ "name": "tiny" }\n' });
+    applyLicense({ dir });
+    assert.equal(JSON.parse(read(dir, "package.json")).license, "SEE LICENSE IN LICENSE");
+  });
+});
+
 describe("license --exclude", () => {
   it("skips matching files for apply and check, with * and ** globs", () => {
     const dir = project({ "package.json": "{}\n", "src/a.ts": 'import "@shelbyb/daywalker-sdk";\n', "src/ui/b.tsx": 'import "@shelbyb/daywalker-sdk";\n', "scripts/c.mjs": 'import "@shelbyb/daywalker-sdk";\n' });

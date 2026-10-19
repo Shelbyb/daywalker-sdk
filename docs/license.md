@@ -14,7 +14,7 @@ npx -p @shelbyb/daywalker-sdk daywalker license check     # exits 1 when anythin
 | Step | Details |
 |---|---|
 | `LICENSE` | Writes the current text. A *different* existing license is kept unless you pass `--replace-existing` (people who already received copies keep the old terms). A governing-law clause you filled in earlier is preserved. |
-| `package.json` | `"license": "SEE LICENSE IN LICENSE"` in the root and every workspace package. **`"private"` is never changed**; private packages are listed so you decide. |
+| `package.json` | `"license": "SEE LICENSE IN LICENSE"` in the root and every workspace package, inserted as text so formatting is untouched. **`"private"` is never changed**, and a package that already declares another license (say MIT) is left alone and listed (use `--replace-existing` to change it). |
 | `README.md` | Adds or replaces a `## License` section after the first prose paragraph. |
 | Notice headers | A block comment on every source file that imports `@shelbyb/daywalker-sdk` (static, dynamic or `require`) or calls a guard (`validateServiceCredentials`, `validateToken`, `getLicense`, `fetchBundle`, or your own via `--guard-names a,b`; add files with `--include a.ts,b.ts`, skip files with `--exclude 'src/ui/**,scripts/*.mjs'`). Tests, `.d.ts`, `docs/`, `examples/` and `node_modules` are skipped. Shebangs stay first. Comments only: **it never edits code that calls the SDK**. |
 | Boot log line | Added to `register()` in a Next.js `instrumentation.ts` (found in the root, `src/` or a workspace). Otherwise listed as a to-do with the exact line. |
