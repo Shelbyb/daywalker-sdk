@@ -579,3 +579,22 @@ To cut a release (maintainers): bump `version` in `package.json`, add a `CHANGEL
 ## License
 
 Proprietary and Confidential. See [LICENSE](./LICENSE) for terms.
+
+## Token management, DPoP and local verification helpers
+
+```ts
+import { createManagementClient, verifyAccessToken, unsealBundle, createDpopProof, generateDpopKey } from "@shelbyb/daywalker-sdk";
+
+// Token CRUD, usage logs and key management authenticate with a user session JWT (not an API key).
+const mgmt = createManagementClient({ authUrl: "https://auth.daywalker.dev", sessionToken: () => getSessionJwt() });
+await mgmt.createToken({ name: "ci", serviceId, additionalServiceIds: [other], allowedOrigins: ["https://app.example.com"], expiresAt: new Date(Date.now() + 864e5) });
+await mgmt.listTokens(); await mgmt.getTokenLogs(id); await mgmt.revokeToken(id);
+
+// Local access token verification (EdDSA, aud, typ at+jwt) with typed `services` / `service_limits`.
+const r = await verifyAccessToken({ token, serviceSlug: "my-service", jwks: await daywalker.fetchJwks() });
+
+// DPoP proof for direct calls, and unsealing a bundle with the derived licenseKey.
+const proof = await createDpopProof(await generateDpopKey(), { method: "GET", url, accessToken });
+const bundle = await unsealBundle(licenseKey, sealed, "my-service");
+```
+Signing helpers (`signRequest`) and key calls (`registerPublicKey`, `listSigningKeys`, `revokeSigningKey`) are exported from the root too. Python, Go and Ruby SDKs are not included yet.

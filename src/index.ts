@@ -113,3 +113,28 @@ export type {
 
 export { buildTokenCookie, clearTokenCookie, daywalkerCookies, accessTokenUser } from "./cookies.js";
 export type { TokenCookieOptions } from "./cookies.js";
+
+export {
+  DaywalkerManagementClient,
+  DaywalkerManagementError,
+  createManagementClient,
+  verifyAccessToken,
+  accessTokenServices,
+  accessTokenServiceLimits,
+  unsealBundle,
+} from "./management.js";
+export type {
+  ServiceLimit,
+  AccessTokenClaims,
+  VerifyAccessTokenOptions,
+  VerifyAccessTokenResult,
+  SealedBundle,
+  ManagementClientOptions,
+  ApiTokenRecord,
+  CreateTokenInput,
+  UpdateTokenInput,
+  TokenLogQuery,
+  TokenLogEntry,
+} from "./management.js";
+export { generateDpopKey, createDpopProof } from "./crypto/index.js";
+export type { DpopKey } from "./crypto/index.js";
