@@ -34,3 +34,5 @@ Events are sent to `POST {host}/a/batch`, which also accepts PostHog's capture f
 ## Web Vitals
 
 `autocaptureWebVitals: true` (or `{ sampleRate, release, environment, path }`), or `analytics.captureWebVitals(options)` which returns a stop function, measures LCP, CLS, INP, FCP, TTFB and page load and sends them to `POST {host}/a/rum` when the page is hidden. Skipped for Do Not Track, Global Privacy Control and while opted out; no-op outside browsers. See the README's Web Vitals section.
+
+Examples: [`examples/`](../examples/README.md).
