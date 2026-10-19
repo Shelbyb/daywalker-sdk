@@ -24,5 +24,7 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run typecheck
       - run: npm test
-      - run: npm run test:coverage
+      # Coverage thresholds (--test-coverage-lines etc.) need Node 22.8+.
+      - if: matrix.node != 20
+        run: npm run test:coverage
       - run: npm run lint:package
