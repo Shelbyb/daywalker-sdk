@@ -28,3 +28,4 @@ jobs:
       - if: matrix.node != 20
         run: npm run test:coverage
       - run: npm run lint:package
+      - run: npm run check:examples
