@@ -22,6 +22,8 @@ export interface LicenseOptions {
   replaceExisting?: boolean;
   /** Extra files (relative to dir) that guard the SDK integration and need the header. */
   include?: string[];
+  /** Paths (relative to dir; `*` matches within a segment, `**` across segments) to leave alone, e.g. UI files that only show SDK snippets. */
+  exclude?: string[];
   /** Identifiers whose callers count as guard files (default: the SDK's own validators). */
   guardNames?: string[];
 }
@@ -173,17 +175,24 @@ function addHeader(source: string): string {
   return `${shebang}${HEADER_COMMENT}${source.slice(shebang.length)}`;
 }
 
+function globToRegExp(glob: string): RegExp {
+  const body = glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*");
+  return new RegExp(`^${body}$`);
+}
+
 /** Files that need the header: SDK importers and guard callers, plus --include. Documentation content is skipped. */
 export function guardFiles(opts: LicenseOptions): string[] {
   const guards = opts.guardNames ?? DEFAULT_GUARDS;
   const found = new Set<string>();
+  const excluded = (opts.exclude ?? []).map(globToRegExp);
   for (const f of walk(opts.dir)) {
-    if (/(?:^|\/)(?:docs?|examples?)\//.test(rel(opts.dir, f))) continue;
+    const r = rel(opts.dir, f);
+    if (/(?:^|\/)(?:docs?|examples?)\//.test(r) || excluded.some((re) => re.test(r))) continue;
     if (usesSdk(read(f), guards)) found.add(f);
   }
   for (const f of opts.include ?? []) {
     const abs = path.resolve(opts.dir, f);
-    if (fs.existsSync(abs)) found.add(abs);
+    if (fs.existsSync(abs) && !excluded.some((re) => re.test(rel(opts.dir, abs)))) found.add(abs);
   }
   return [...found].sort();
 }

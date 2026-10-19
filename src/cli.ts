@@ -16,8 +16,8 @@ Usage:
   daywalker check  [--offline]
   daywalker keys   [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--json]
   daywalker revoke <keyId> [--domain <host>] [--auth-url <url>] [--api-key-stdin] [--force]
-  daywalker license apply [--dir <path>] [--governing-law <text>] [--include <file,…>] [--guard-names <name,…>] [--replace-existing] [--dry-run]
-  daywalker license check [--dir <path>] [--include <file,…>] [--guard-names <name,…>]
+  daywalker license apply [--dir <path>] [--governing-law <text>] [--include <file,…>] [--exclude <glob,…>] [--guard-names <name,…>] [--replace-existing] [--dry-run]
+  daywalker license check [--dir <path>] [--include <file,…>] [--exclude <glob,…>] [--guard-names <name,…>]
 
 onboard  Guided setup for a new developer: sign up (or log in), verify the email, pick a service from the live
          list, give the public app URL, create an API token (allowed origins: the URL plus https://localhost:3000),
@@ -465,6 +465,7 @@ async function main() {
       dryRun: Boolean(parsedArgs["dry-run"]),
       replaceExisting: Boolean(parsedArgs["replace-existing"]),
       include: list(parsedArgs.include),
+      exclude: list(parsedArgs.exclude),
       guardNames: list(parsedArgs["guard-names"]),
       governingLaw: typeof parsedArgs["governing-law"] === "string" ? parsedArgs["governing-law"] : undefined,
     };
