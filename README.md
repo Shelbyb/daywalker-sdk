@@ -578,4 +578,4 @@ To cut a release (maintainers): bump `version` in `package.json`, add a `CHANGEL
 
 ## License
 
-MIT
+Proprietary and Confidential. See [LICENSE](./LICENSE) for terms.
