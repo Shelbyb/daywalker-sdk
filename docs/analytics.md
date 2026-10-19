@@ -30,3 +30,7 @@ Add each flag's value to events (for breakdowns by variation) with `flags: clien
 Options: `autocapturePageviews` (default true), `flushAt` (20), `flushInterval` (2s browser / 10s Node), `maxQueueSize` (1000), `persistence` (`localStorage` | `memory`), `sessionTimeoutMinutes` (30), `respectDoNotTrack`, `optedOut` (consent; opting out also drops events already queued), `captureFullUrls` (default false: URLs drop the fragment and all query parameters except `utm_*`, `gclid`, `fbclid`, `ref`), `sanitizePath` (rewrite paths that carry secrets, e.g. `(p) => p.replace(/^\/reset\/[^/]+/, "/reset/:token")`), `onError`. `host` must be `https://` except on localhost.
 
 Events are sent to `POST {host}/a/batch`, which also accepts PostHog's capture format.
+
+## Web Vitals
+
+`autocaptureWebVitals: true` (or `{ sampleRate, release, environment, path }`), or `analytics.captureWebVitals(options)` which returns a stop function, measures LCP, CLS, INP, FCP, TTFB and page load and sends them to `POST {host}/a/rum` when the page is hidden. Skipped for Do Not Track, Global Privacy Control and while opted out; no-op outside browsers. See the README's Web Vitals section.
