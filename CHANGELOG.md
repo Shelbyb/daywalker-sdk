@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.14.0
+- **Multi-language signed token validation examples:** added runnable Python, Go, and Ruby examples under `examples/` demonstrating how to validate Daywalker signed tokens across languages without the TypeScript SDK.
+
 ## 0.13.0
 - **New DevPulse clients**, all fetch/WebCrypto only (Node, Deno, Bun, Workers, browsers where it makes sense), HTTPS-only except localhost, credentials only in headers or bodies, redirects refused, sizes capped to DevPulse's limits:
   - `/webhooks`: `verifyWebhook()` for Standard Webhooks signatures (`whsec_` secrets, 5 minute tolerance, constant-time compare, multiple signatures, secret rotation), typed `WebhookEvent`, `signWebhook()`, `isEventType()`. Conformance vectors in `test-vectors/webhooks-standard.json`.
