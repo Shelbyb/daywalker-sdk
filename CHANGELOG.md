@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.15.0
+- **Licensing and CLA updates:** Updated project license to a proprietary SDK license (`UNLICENSED` in `package.json`) and added `CONTRIBUTING.md` outlining the Contributor License Agreement (CLA) terms and contribution guidelines.
+
 ## 0.14.0
 - **Multi-language signed token validation examples:** added runnable Python, Go, and Ruby examples under `examples/` demonstrating how to validate Daywalker signed tokens across languages without the TypeScript SDK.
 
