@@ -1,6 +1,6 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics, Web Vitals, management API client) in one package with a single runtime dependency (re2js).",
   "type": "module",
   "main": "./dist/index.js",
@@ -76,6 +76,46 @@
       "import": "./dist/api/index.js",
       "default": "./dist/api/index.js"
     },
+    "./webhooks": {
+      "types": "./dist/webhooks/index.d.ts",
+      "import": "./dist/webhooks/index.js",
+      "default": "./dist/webhooks/index.js"
+    },
+    "./cron": {
+      "types": "./dist/cron/index.d.ts",
+      "import": "./dist/cron/index.js",
+      "default": "./dist/cron/index.js"
+    },
+    "./logs": {
+      "types": "./dist/logs/index.d.ts",
+      "import": "./dist/logs/index.js",
+      "default": "./dist/logs/index.js"
+    },
+    "./secrets": {
+      "types": "./dist/secrets/index.d.ts",
+      "import": "./dist/secrets/index.js",
+      "default": "./dist/secrets/index.js"
+    },
+    "./secrets/env": {
+      "types": "./dist/secrets/env.d.ts",
+      "import": "./dist/secrets/env.js",
+      "default": "./dist/secrets/env.js"
+    },
+    "./oncall": {
+      "types": "./dist/oncall/index.d.ts",
+      "import": "./dist/oncall/index.js",
+      "default": "./dist/oncall/index.js"
+    },
+    "./slo": {
+      "types": "./dist/slo/index.d.ts",
+      "import": "./dist/slo/index.js",
+      "default": "./dist/slo/index.js"
+    },
+    "./deploys": {
+      "types": "./dist/deploys/index.d.ts",
+      "import": "./dist/deploys/index.js",
+      "default": "./dist/deploys/index.js"
+    },
     "./package.json": "./package.json"
   },
   "bin": {
@@ -95,9 +135,10 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --import tsx --test test/*.test.ts",
-    "test:coverage": "npm run build && node --import tsx --test --experimental-test-coverage --test-coverage-include=src/analytics/web-vitals.ts --test-coverage-lines=90 --test-coverage-branches=90 --test-coverage-functions=90 test/*.test.ts",
+    "test:coverage": "npm run build && node --import tsx --test --experimental-test-coverage --test-coverage-include=src/analytics/web-vitals.ts --test-coverage-include='src/{webhooks,cron,logs,secrets,oncall,slo,deploys,common}/**' --test-coverage-lines=90 --test-coverage-branches=90 --test-coverage-functions=90 test/*.test.ts",
     "lint:package": "publint --strict && attw --pack . --profile esm-only",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test",
+    "check:examples": "npm run build && tsc -p examples/tsconfig.json"
   },
   "publishConfig": {
     "access": "public",
@@ -135,7 +176,14 @@
     "request-signing",
     "web-vitals",
     "rum",
-    "rest-api"
+    "rest-api",
+    "webhooks",
+    "standard-webhooks",
+    "cron-monitoring",
+    "logging",
+    "secrets",
+    "slo",
+    "on-call"
   ],
   "homepage": "https://auth.daywalker.dev/docs",
   "bugs": {

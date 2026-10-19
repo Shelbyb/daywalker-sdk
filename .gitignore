@@ -31,5 +31,7 @@ pnpm-debug.log*
 coverage/
 .nyc_output/
 
-# Local reference copy of gigpulse's SDK.md (kept in sync by hand, never committed)
+# Local reference documentation
+.daywalker/
 SDK.md
+

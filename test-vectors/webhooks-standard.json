@@ -1,0 +1,101 @@
+{
+  "description": "Standard Webhooks v1 signatures as DevPulse sends them: v1,base64(HMAC-SHA256(base64decode(secret without whsec_), id + \".\" + timestamp + \".\" + rawBody)). now is Unix seconds; tolerance 300.",
+  "cases": [
+    {
+      "name": "standard-webhooks spec example",
+      "secret": "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+      "id": "msg_p5jXN8AQM9LWM0D4loKWxJek",
+      "timestamp": 1614265330,
+      "now": 1614265330,
+      "body": "{\"test\": 2432232314}",
+      "signature": "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=",
+      "valid": true,
+      "parse": false
+    },
+    {
+      "name": "devpulse flag.updated",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "0b7f6a51-2f0e-4c39-9a4e-3f6f3f7a9d10",
+      "timestamp": 1792411200,
+      "now": 1792411260,
+      "body": "{\"type\":\"flag.updated\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"key\":\"new-checkout\",\"project\":\"web\"}}",
+      "signature": "v1,oD7Vu83/QpbYabQylcOw7nSGkIjt5MiPCZaQuh4xW3M=",
+      "valid": true
+    },
+    {
+      "name": "multiple signatures, second matches",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "d2",
+      "timestamp": 1792411200,
+      "now": 1792411200,
+      "body": "{\"type\":\"flag.updated\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"key\":\"new-checkout\",\"project\":\"web\"}}",
+      "signature": "v1,AAAA v1,OxG+IfEJavdfgwAhSzxMZIFyhHZZXmnWrZFdNK4FeEc=",
+      "valid": true
+    },
+    {
+      "name": "unicode body",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "d3",
+      "timestamp": 1792411200,
+      "now": 1792411200,
+      "body": "{\"type\":\"ping\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"message\":\"héllo ✓\"}}",
+      "signature": "v1,c11XNpYWZxrYZmZMBsPb0AY/cX4Ri0RuBgM/b+Jzdyw=",
+      "valid": true
+    },
+    {
+      "name": "tampered body",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "d4",
+      "timestamp": 1792411200,
+      "now": 1792411200,
+      "body": "{\"type\":\"flag.updated\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"key\":\"new-checkout\",\"project\":\"api\"}}",
+      "signature": "v1,43gbgBf1ze/ltvwsX69IJj/K59VhCZ/iazffmNSN2iU=",
+      "valid": false,
+      "error": "INVALID_SIGNATURE"
+    },
+    {
+      "name": "wrong id",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "d5-other",
+      "timestamp": 1792411200,
+      "now": 1792411200,
+      "body": "{\"type\":\"flag.updated\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"key\":\"new-checkout\",\"project\":\"web\"}}",
+      "signature": "v1,tSiujjEZ5Y8cO9oSTPwFrbNnQA3pvXywy46QkuPcUfA=",
+      "valid": false,
+      "error": "INVALID_SIGNATURE"
+    },
+    {
+      "name": "timestamp too old",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "d6",
+      "timestamp": 1792411200,
+      "now": 1792411501,
+      "body": "{\"type\":\"flag.updated\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"key\":\"new-checkout\",\"project\":\"web\"}}",
+      "signature": "v1,kA4enUBwWrChAfzukcXC6A0DD1DoJ+m5houitHyTK6Y=",
+      "valid": false,
+      "error": "TIMESTAMP_OUT_OF_TOLERANCE"
+    },
+    {
+      "name": "timestamp too far ahead",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "d7",
+      "timestamp": 1792411200,
+      "now": 1792410899,
+      "body": "{\"type\":\"flag.updated\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"key\":\"new-checkout\",\"project\":\"web\"}}",
+      "signature": "v1,DQ2oD5EsDSYIRLKtNzvLiKg1G5X7tt/2Bgql8OP7mEA=",
+      "valid": false,
+      "error": "TIMESTAMP_OUT_OF_TOLERANCE"
+    },
+    {
+      "name": "v2 prefix ignored",
+      "secret": "whsec_BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+      "id": "d8",
+      "timestamp": 1792411200,
+      "now": 1792411200,
+      "body": "{\"type\":\"flag.updated\",\"timestamp\":\"2026-10-19T12:00:00.000Z\",\"data\":{\"key\":\"new-checkout\",\"project\":\"web\"}}",
+      "signature": "v2,zly2Bx+yrTAc08SXUIPh5tWMTVrMcQOO/EV7iZqiaZY=",
+      "valid": false,
+      "error": "INVALID_SIGNATURE"
+    }
+  ]
+}
