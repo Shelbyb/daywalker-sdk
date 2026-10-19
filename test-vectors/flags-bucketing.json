@@ -1,0 +1,97 @@
+{
+  "description": "Bucketing: input = '<flagKey>.<salt>.<key>' (or '<seed>.<key>' when the rollout has a seed). bucket = float64(int(first 15 hex digits of sha1(input), base 16)) / float64(0xFFFFFFFFFFFFFFF). Compare with a tolerance of 1e-12. A rollout picks the first weighted variation whose cumulative weight/100000 exceeds the bucket (the last one if none does).",
+  "version": 1,
+  "cases": [
+    {
+      "flagKey": "new-checkout",
+      "salt": "salt1",
+      "key": "u1",
+      "input": "new-checkout.salt1.u1",
+      "sha1": "fcd29b0c9fee5734e2c8db3bcb76603f9b012ed7",
+      "bucket": 0.9875885873624893
+    },
+    {
+      "flagKey": "new-checkout",
+      "salt": "salt1",
+      "key": "u2",
+      "input": "new-checkout.salt1.u2",
+      "sha1": "425a4125478d4131b3551b055acce519160a0b7c",
+      "bucket": 0.25918967399734516
+    },
+    {
+      "flagKey": "new-checkout",
+      "salt": "salt1",
+      "key": "user-123",
+      "input": "new-checkout.salt1.user-123",
+      "sha1": "314f3530d4d13868845532add7a28b04c9a61f1c",
+      "bucket": 0.19261486475153766
+    },
+    {
+      "flagKey": "new-checkout",
+      "salt": "salt1",
+      "key": "ünï-ключ-🙂",
+      "input": "new-checkout.salt1.ünï-ключ-🙂",
+      "sha1": "e55860a4b84008f2f552507e8d7fb478a9ab2859",
+      "bucket": 0.8958797838351985
+    },
+    {
+      "flagKey": "new-checkout",
+      "salt": "salt1",
+      "key": "a.b.c",
+      "input": "new-checkout.salt1.a.b.c",
+      "sha1": "6b1e3254bb6c55c3f5523d14a9cc266afd2d32b8",
+      "bucket": 0.4184295136323482
+    },
+    {
+      "flagKey": "f",
+      "salt": "s",
+      "key": "u1",
+      "input": "f.s.u1",
+      "sha1": "98324b02bebf9a82f365169b3a70fca84d9f1b15",
+      "bucket": 0.5945174104406291
+    },
+    {
+      "flagKey": "f",
+      "salt": "other",
+      "key": "u1",
+      "input": "f.other.u1",
+      "sha1": "fc92d04f8862593801cc5320d198c4be73fc0b9c",
+      "bucket": 0.9866151994868998
+    },
+    {
+      "flagKey": "flag.with.dots",
+      "salt": "s",
+      "key": "k",
+      "input": "flag.with.dots.s.k",
+      "sha1": "f8fecfdd11b862abbb585ba680b2a2baca1a8a90",
+      "bucket": 0.9726381220550322
+    },
+    {
+      "flagKey": "exp",
+      "salt": "x",
+      "key": "u1",
+      "seed": 61234,
+      "input": "61234.u1",
+      "sha1": "6cf8b4950fa7c1c6a8286f1a5415ac18dd422bb8",
+      "bucket": 0.42566994322956386
+    },
+    {
+      "flagKey": "exp",
+      "salt": "x",
+      "key": "u2",
+      "seed": 61234,
+      "input": "61234.u2",
+      "sha1": "43e079d9019c099450041269447172f6e706f7f5",
+      "bucket": 0.2651439814377313
+    },
+    {
+      "flagKey": "exp",
+      "salt": "x",
+      "key": "u3",
+      "seed": 61234,
+      "input": "61234.u3",
+      "sha1": "7d2803060a300886aa5346defe7e1a40235c69d8",
+      "bucket": 0.4888917817826838
+    }
+  ]
+}

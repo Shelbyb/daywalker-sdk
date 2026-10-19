@@ -1,9 +1,9 @@
-import { createHmac } from "node:crypto";
-import { EventEmitter } from "node:events";
 import { Evaluator, MemoryStore, evaluateFlag, parseContext, type ContextInput, type EvaluationDetail, type FlagConfig, type FlagValue, type SegmentConfig } from "./engine/index.js";
+import { Emitter } from "./common/emitter.js";
+import { hmacSha256Hex } from "./common/hmac.js";
 import { EventProcessor, SDK_VERSION, SseClient, noopLogger, type Logger } from "./common/index.js";
 import type { FlagSet } from "./client.js";
-import { assertSecureUrl } from "../config.js";
+import { assertSecureUrl } from "../secure-url.js";
 
 export type { ContextInput, EvaluationDetail, FlagSet, FlagValue, Logger };
 export { SDK_VERSION };
@@ -56,7 +56,7 @@ export interface AllFlagsStateOptions {
  *   await client.waitForInitialization({ timeoutMs: 5000 });
  *   const enabled = await client.variation("new-checkout", { key: user.id, email: user.email }, false);
  */
-export class DevPulseNodeClient extends EventEmitter {
+export class DevPulseNodeClient extends Emitter {
   private store = new MemoryStore();
   private stream: SseClient | null = null;
   private poller: ReturnType<typeof setInterval> | null = null;
@@ -315,7 +315,7 @@ export class DevPulseNodeClient extends EventEmitter {
 
   /** Secure mode hash for a context, for the browser SDK's `hash` option. */
   secureModeHash(context: ContextInput): string {
-    return createHmac("sha256", this.sdkKey).update(parseContext(context).canonicalKey).digest("hex");
+    return hmacSha256Hex(this.sdkKey, parseContext(context).canonicalKey);
   }
 
   track(key: string, context: ContextInput, data?: unknown, metricValue?: number) {

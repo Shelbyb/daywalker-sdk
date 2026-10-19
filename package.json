@@ -1,7 +1,7 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.11.0",
-  "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics) in one package with a single runtime dependency (re2js).",
+  "version": "0.12.0",
+  "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics, Web Vitals, management API client) in one package with a single runtime dependency (re2js).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -70,7 +70,13 @@
       "types": "./dist/analytics/index.d.ts",
       "import": "./dist/analytics/index.js",
       "default": "./dist/analytics/index.js"
-    }
+    },
+    "./api": {
+      "types": "./dist/api/index.d.ts",
+      "import": "./dist/api/index.js",
+      "default": "./dist/api/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
     "daywalker": "dist/cli.js"
@@ -126,7 +132,10 @@
     "feature-flags",
     "openfeature",
     "product-analytics",
-    "request-signing"
+    "request-signing",
+    "web-vitals",
+    "rum",
+    "rest-api"
   ],
   "homepage": "https://auth.daywalker.dev/docs",
   "bugs": {

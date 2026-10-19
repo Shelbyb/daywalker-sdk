@@ -514,7 +514,10 @@ The same package ships the [DevPulse](https://github.com/shelbyb/devpulse) clien
 | `@shelbyb/daywalker-sdk/flags/react` | React provider and hooks (SSR bootstrap, no flicker) | [docs/flags-react.md](./docs/flags-react.md) |
 | `@shelbyb/daywalker-sdk/flags/engine` | The deterministic evaluation engine (advanced / testing) | — |
 | `@shelbyb/daywalker-sdk/openfeature/server`, `/openfeature/web` | OpenFeature providers | [docs/openfeature.md](./docs/openfeature.md) |
-| `@shelbyb/daywalker-sdk/analytics` | Product analytics: events, page views, identify, sessions (browser and Node) | [docs/analytics.md](./docs/analytics.md) |
+| `@shelbyb/daywalker-sdk/analytics` | Product analytics: events, page views, identify, sessions (browser and Node), plus `captureWebVitals()` | [docs/analytics.md](./docs/analytics.md) |
+| `@shelbyb/daywalker-sdk/api` | Typed management REST API client: OAuth client credentials, RFC 9457 errors, Link pagination, retries | [docs/api-client.md](./docs/api-client.md) |
+
+The flags, analytics and API entry points run unchanged in browsers, Node, Deno, Bun and Cloudflare Workers ([docs/runtimes.md](./docs/runtimes.md)). Writing an SDK for another language? See the wire contract in [docs/protocol.md](./docs/protocol.md) and the JSON conformance vectors in `test-vectors/`.
 
 ```ts
 import { createClient } from "@shelbyb/daywalker-sdk/flags";
@@ -522,6 +525,7 @@ import { createAnalytics } from "@shelbyb/daywalker-sdk/analytics";
 
 const flags = createClient(clientSideId, { kind: "user", key: user.id }, { baseUrl: "https://devpulse.example.com" });
 const analytics = createAnalytics({ writeKey: "dpa_…", host: "https://devpulse.example.com", flags }); // events carry $feature/<key>
+analytics.captureWebVitals({ release: "1.4.2", environment: "production" }); // LCP, INP, CLS, FCP, TTFB to /a/rum
 ```
 
 ### Web Vitals
