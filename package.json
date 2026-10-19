@@ -1,6 +1,6 @@
 {
   "name": "@shelbyb/daywalker-sdk",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "description": "Daywalker Auth service validation plus the DevPulse client SDKs (feature flags, OpenFeature, product analytics, Web Vitals, management API client) in one package with a single runtime dependency (re2js).",
   "license": "UNLICENSED",
   "type": "module",
@@ -136,7 +136,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --import tsx --test test/*.test.ts",
-    "test:coverage": "npm run build && node --import tsx --test --experimental-test-coverage --test-coverage-include=src/analytics/web-vitals.ts --test-coverage-include='src/{webhooks,cron,logs,secrets,oncall,slo,deploys,common}/**' --test-coverage-lines=90 --test-coverage-branches=90 --test-coverage-functions=90 test/*.test.ts",
+    "test:coverage": "npm run build && node --import tsx --test --experimental-test-coverage --test-coverage-include=src/analytics/web-vitals.ts --test-coverage-include='src/{webhooks,cron,logs,secrets,oncall,slo,deploys,common,license}/**' --test-coverage-lines=90 --test-coverage-branches=90 --test-coverage-functions=90 test/*.test.ts",
     "lint:package": "publint --strict && attw --pack . --profile esm-only",
     "prepublishOnly": "npm test",
     "check:examples": "npm run build && tsc -p examples/tsconfig.json"

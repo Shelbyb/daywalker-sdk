@@ -455,6 +455,7 @@ const bundle = await client.fetchBundle();                     // { dataKeySalt,
 | `npx daywalker rotate [--service <slug[,slug…]>] [--api-key-stdin] [--skip-register] [--json]` | Generate and register a new key while preserving the previous key in `.env.local`. The previous key stays registered until you revoke it, so running deployments keep working |
 | `npx daywalker keys [--domain <host>] [--json]` | List the domain's signing keys: status, slot, expiry, last use, and which one is current or previous |
 | `npx daywalker revoke <keyId> [--force]` | Revoke a key now; Daywalker also ends the OAuth sessions it started. Refuses the current `DAYWALKER_KEY_ID` unless `--force` |
+| `npx daywalker license apply\|check [--dir <path>] [--governing-law <text>] [--dry-run]` | Install or verify the DevPulse source-available license in a project: `LICENSE`, `package.json` fields, README section, notice headers on files that use the SDK, and the boot log line ([docs/license.md](./docs/license.md)) |
 
 ---
 
