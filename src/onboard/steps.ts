@@ -99,7 +99,10 @@ export async function login(api: OnboardApi, input: { email: string; password: s
 
 export async function listServices(api: OnboardApi, sessionToken: string): Promise<ServiceInfo[]> {
   const data = await api("/api/v1/services", { token: sessionToken });
-  return (Array.isArray(data.services) ? data.services : []).filter((s: ServiceInfo) => s && s.id && s.slug);
+  // Slugs end up in .env.local and on the terminal: keep only well-formed entries.
+  return (Array.isArray(data.services) ? data.services : []).filter(
+    (s: ServiceInfo) => s && typeof s.id === "string" && s.id && typeof s.slug === "string" && /^[a-z0-9_-]+$/.test(s.slug)
+  );
 }
 
 export async function createToken(

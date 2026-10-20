@@ -139,6 +139,58 @@ describe("DevPulseClient", () => {
     expect(client.isClosed).toBe(true);
   });
 
+  it("a delete leaves a tombstone: an older patch can't resurrect the flag; malformed patches are ignored", async () => {
+    const s = streamingFetch();
+    const client = createClient("cid", { key: "u1" }, { baseUrl: "https://x", fetch: s.f, sendEvents: false });
+    await tick();
+    s.push('event: put\ndata: {"a":{"value":true,"variation":0,"version":1}}\n\n');
+    await client.waitForInitialization({ timeoutMs: 1000 });
+    s.push('event: delete\ndata: {"key":"a","version":5}\n\n');
+    s.push('event: patch\ndata: {"key":"a","value":true,"variation":0,"version":4}\n\n');
+    // A delete for a flag we never had still blocks its older patches.
+    s.push('event: delete\ndata: {"key":"b","version":3}\n\n');
+    s.push('event: patch\ndata: {"key":"b","value":true,"variation":0,"version":2}\n\n');
+    // No key / no version: ignored rather than stored under "undefined" or bypassing ordering.
+    s.push('event: patch\ndata: {"value":true,"variation":0,"version":9}\n\n');
+    s.push('event: patch\ndata: {"key":"c","value":true,"variation":0}\n\n');
+    await tick();
+    expect(client.allFlags()).toEqual({});
+    s.push('event: patch\ndata: {"key":"a","value":false,"variation":1,"version":6}\n\n');
+    await tick();
+    expect(client.allFlags()).toEqual({ a: false });
+    await client.close();
+  });
+
+  it("reports a change for a flag keyed __proto__ and doesn't keep empty listener sets", async () => {
+    const s = streamingFetch();
+    const client = createClient("cid", { key: "u1" }, { baseUrl: "https://x", fetch: s.f, sendEvents: false });
+    await tick();
+    const changes: string[][] = [];
+    client.on("change", (c) => changes.push(Object.keys(c as object)));
+    s.push('event: put\ndata: {"__proto__":{"value":1,"variation":0,"version":1}}\n\n');
+    await client.waitForInitialization({ timeoutMs: 1000 });
+    expect(changes).toEqual([["__proto__"]]);
+    expect(client.variation("__proto__", 0)).toBe(1);
+    const listeners = (client as unknown as { listeners: Map<string, Set<unknown>> }).listeners;
+    const off = client.on("change:x", () => undefined);
+    expect(listeners.has("change:x")).toBe(true);
+    off();
+    expect(listeners.has("change:x")).toBe(false);
+    await client.close();
+  });
+
+  it("passes an abort signal to the flags request so a stalled server can't hang identify()", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    const f = (async (_url: string, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined);
+      return Response.json({});
+    }) as unknown as typeof fetch;
+    const client = createClient("cid", { key: "u1" }, { baseUrl: "https://x", streaming: false, sendEvents: false, fetch: f });
+    await client.waitForInitialization({ timeoutMs: 1000 });
+    expect(signals[0] instanceof AbortSignal).toBe(true);
+    await client.close();
+  });
+
   it("exposes one version constant", () => {
     expect(SDK_VERSION).toBe(VERSION_CONSTANT);
     expect(SDK_VERSION).toBe("0.4.0");

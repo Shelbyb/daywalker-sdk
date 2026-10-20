@@ -46,7 +46,26 @@ const SKIP_FILE = /(?:\.test\.|\.spec\.|\.d\.ts$|\.stories\.)/;
 const read = (file: string) => fs.readFileSync(file, "utf8");
 const rel = (dir: string, file: string) => path.relative(dir, file).split(path.sep).join("/");
 
+/** Is `file` inside `dir` once symlinks are resolved? */
+function insideDir(dir: string, file: string): boolean {
+  let r: string;
+  try {
+    r = path.relative(fs.realpathSync(dir), fs.realpathSync(file));
+  } catch {
+    return false;
+  }
+  return r !== "" && r !== ".." && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r);
+}
+
+/** Writes never follow a symlink (it could point outside the project). */
+function writable(dir: string, file: string, report: LicenseReport): boolean {
+  if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) return true;
+  report.todo.push(`${rel(dir, file)} is a symlink; left as is (update the file it points to by hand).`);
+  return false;
+}
+
 function write(dir: string, file: string, content: string, opts: LicenseOptions, report: LicenseReport) {
+  if (!writable(dir, file, report)) return;
   const before = fs.existsSync(file) ? read(file) : null;
   if (before === content) {
     report.unchanged.push(rel(dir, file));
@@ -98,7 +117,8 @@ function workspaceDirs(dir: string, root: { workspaces?: string[] | { packages?:
       if (fs.existsSync(base)) for (const e of fs.readdirSync(base, { withFileTypes: true })) if (e.isDirectory()) out.push(path.join(base, e.name));
     } else if (!pattern.includes("*")) out.push(path.join(dir, pattern));
   }
-  return out.filter((d) => fs.existsSync(path.join(d, "package.json")));
+  // Workspaces outside the project ("../other", symlinked dirs) are not ours to edit.
+  return out.filter((d) => fs.existsSync(path.join(d, "package.json")) && insideDir(dir, path.join(d, "package.json")));
 }
 
 const OUR_LICENSE = "SEE LICENSE IN LICENSE";
@@ -115,6 +135,7 @@ function setLicenseField(raw: string): string | null {
 }
 
 function applyPackageJson(file: string, opts: LicenseOptions, report: LicenseReport) {
+  if (!writable(opts.dir, file, report)) return;
   const raw = read(file);
   const pkg = JSON.parse(raw) as Record<string, unknown>;
   const name = rel(opts.dir, file);
@@ -166,7 +187,7 @@ function* walk(dir: string): Generator<string> {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.isDirectory()) {
       if (!SKIP_DIR.has(e.name) && !e.name.startsWith(".")) yield* walk(path.join(dir, e.name));
-    } else if (SOURCE_EXT.test(e.name) && !SKIP_FILE.test(e.name)) yield path.join(dir, e.name);
+    } else if (e.isFile() && SOURCE_EXT.test(e.name) && !SKIP_FILE.test(e.name)) yield path.join(dir, e.name);
   }
 }
 
@@ -198,7 +219,9 @@ export function guardFiles(opts: LicenseOptions): string[] {
   }
   for (const f of opts.include ?? []) {
     const abs = path.resolve(opts.dir, f);
-    if (fs.existsSync(abs) && !excluded.some((re) => re.test(rel(opts.dir, abs)))) found.add(abs);
+    // --include only names files inside the project (no "../", absolute paths or symlinks out of it).
+    if (!fs.existsSync(abs) || !insideDir(opts.dir, abs) || !fs.lstatSync(abs).isFile()) continue;
+    if (!excluded.some((re) => re.test(rel(opts.dir, abs)))) found.add(abs);
   }
   return [...found].sort();
 }

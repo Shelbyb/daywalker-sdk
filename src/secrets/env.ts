@@ -26,7 +26,10 @@ export async function loadSecrets(options: LoadSecretsOptions): Promise<LoadSecr
   const loaded: string[] = [];
   const skipped: string[] = [];
   for (const [k, v] of Object.entries(result.secrets)) {
-    if (!options.override && env[k] !== undefined) skipped.push(k);
+    // `__proto__` would hit the prototype setter of a plain `env` object; inherited members
+    // (toString, constructor…) are not "already set" variables.
+    const set = Object.prototype.hasOwnProperty.call(env, k) && env[k] !== undefined;
+    if (k === "__proto__" || (!options.override && set)) skipped.push(k);
     else {
       env[k] = v;
       loaded.push(k);

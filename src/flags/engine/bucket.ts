@@ -24,7 +24,8 @@ export function bucketContext(
   if (typeof raw === "string") id = raw;
   else if (typeof raw === "number" && Number.isInteger(raw)) id = String(raw);
   else return { bucket: 0, found: true };
-  const input = opts.seed !== undefined ? `${opts.seed}.${id}` : `${key}.${salt}.${id}`;
+  // `seed: null` (as serialized for "no seed") means unseeded, not the string "null".
+  const input = opts.seed !== undefined && opts.seed !== null ? `${opts.seed}.${id}` : `${key}.${salt}.${id}`;
   return { bucket: parseInt(sha1Hex(input).slice(0, 15), 16) / LONG_SCALE, found: true };
 }
 

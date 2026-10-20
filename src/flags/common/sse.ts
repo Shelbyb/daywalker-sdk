@@ -38,12 +38,15 @@ export class SseParser {
     }
     if (this.pendingCR && chunk.startsWith("\n")) chunk = chunk.slice(1);
     this.pendingCR = false;
+    // The pending buffer never holds a line ending, so only the new chunk needs scanning
+    // (a long line arriving in many small chunks stays linear, not quadratic).
+    const scanFrom = this.buffer.length;
     this.buffer += chunk;
     const out: SseEvent[] = [];
     // Lines end with CRLF, LF or CR. A CR ends the line immediately (so events
     // dispatch without waiting for more bytes); an LF right after it is skipped.
     let start = 0;
-    for (let i = 0; i < this.buffer.length; i++) {
+    for (let i = scanFrom; i < this.buffer.length; i++) {
       const c = this.buffer[i];
       if (c !== "\n" && c !== "\r") continue;
       const line = this.buffer.slice(start, i);
@@ -251,7 +254,7 @@ export class SseClient {
         this.lastEventId = parser.lastEventId;
         this.retry = parser.retry;
         for (const ev of events) {
-          if (this.controller !== controller) return; // superseded by restart()/stop() from a handler
+          if (this.stopped || this.controller !== controller) return; // superseded by restart()/stop() from a handler
           this.opts.onEvent(ev);
         }
       }

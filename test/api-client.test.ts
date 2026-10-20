@@ -267,3 +267,33 @@ describe("api client: timeouts", () => {
     expect(apiCalls(none.calls)[1]!.init.signal).toBe(ac.signal);
   });
 });
+
+describe("api client: hardening", () => {
+  it("rejects dot segments so interpolated ids cannot traverse to another endpoint", async () => {
+    const { api, calls } = setup((url) => (isTok(url) ? token() : json({})));
+    for (const p of ["/api/v1/projects/../oauth/token", "/api/v1/projects/%2e%2E/x", "/api/v1/./x", "/api/v1/.%2e/x", "/api/v1/a\\..\\b", "/api/v1/.\t./x", `/api/v1/projects/${encodeURIComponent("..")}/deploys`]) {
+      let err: Error | undefined;
+      try {
+        await api.get(p);
+      } catch (e) {
+        err = e as Error;
+      }
+      expect(err?.message ?? "").toMatch(/\. or \.\. segments/);
+    }
+    expect(calls).toHaveLength(0);
+    await api.get("/api/v1/flags/a..b/x.y", { query: { q: "../.." } });
+    expect(apiCalls(calls)[0]!.url).toBe("https://dp.example.com/api/v1/flags/a..b/x.y?q=..%2F..");
+    await api.get("/api/v1/x?next=/../y");
+    expect(apiCalls(calls)[1]!.url).toBe("https://dp.example.com/api/v1/x?next=/../y");
+  });
+
+  it("never follows redirects from the token endpoint and keeps the access token out of inspect output", async () => {
+    const { api, calls } = setup((url) => (isTok(url) ? token(7) : json({})));
+    await api.get("/api/v1/x");
+    const tok = calls.find((c) => isTok(c.url))!;
+    expect(tok.init.redirect).toBe("error");
+    const { inspect } = await import("node:util");
+    expect(inspect(api, { depth: 5 })).not.toMatch(/tok7|s3cret/);
+    expect(JSON.stringify(api)).not.toMatch(/tok7|s3cret/);
+  });
+});

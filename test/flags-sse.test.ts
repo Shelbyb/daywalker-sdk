@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import { expect } from "./helpers/expect.js";
-import { DEFAULT_MAX_EVENT_SIZE, EventProcessor, MAX_EVENTS_PER_REQUEST, MAX_REQUEST_BYTES, MIN_SERVER_RETRY_MS, SseClient, SseParser, chunkEvents, encodeContext } from "../src/flags/common/index.js";
+import { DEFAULT_MAX_EVENT_SIZE, EventProcessor, MAX_EVENTS_PER_REQUEST, MAX_REQUEST_BYTES, MIN_SERVER_RETRY_MS, SseClient, SseParser, chunkEvents, encodeContext, requestTimeout } from "../src/flags/common/index.js";
 
 const parse = (...chunks: string[]) => {
   const p = new SseParser();
@@ -178,6 +178,32 @@ describe("SseClient", () => {
     expect(DEFAULT_MAX_EVENT_SIZE).toBe(1024 * 1024);
   });
 
+  it("parses a long line fed in many small chunks in linear time, splitting correctly", () => {
+    const p = new SseParser();
+    const line = "data: " + "x".repeat(500_000);
+    const started = Date.now();
+    for (let i = 0; i < line.length; i += 50) expect(p.feed(line.slice(i, i + 50))).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(2000); // a full rescan per chunk took ~minutes
+    const [ev] = p.feed("\r\n\r\n");
+    expect(ev!.data.length).toBe(500_000);
+  });
+
+  it("stop() from inside an event handler stops dispatching the rest of the chunk", async () => {
+    const s = scriptedFetch([() => body(["data: 1\n\ndata: 2\n\ndata: 3\n\n"], false)]);
+    const got: string[] = [];
+    const c: SseClient = new SseClient({
+      url: "http://x/s",
+      fetch: s.f,
+      onEvent: (e) => {
+        got.push(e.data);
+        c.stop();
+      },
+    });
+    c.start();
+    await wait(20);
+    expect(got).toEqual(["1"]);
+  });
+
   it("sends only CORS-safelisted headers in browsers", async () => {
     const s = scriptedFetch([() => body(["id: 1\n\n"]), () => body([], false)]);
     const c = new SseClient({ url: "http://x/s", fetch: s.f, browser: true, headers: { authorization: "k" }, initialRetryMs: 1, maxRetryMs: 1, onEvent() {}, onError: () => true });
@@ -265,5 +291,29 @@ describe("EventProcessor flush", () => {
     expect(posts.reduce((n, p) => n + p.count, 0)).toBe(9001 + 2); // custom events + one index event per context
     for (const p of posts) expect(p.count).toBeLessThan(5001);
     expect(posts.filter((p) => p.keepalive)).toHaveLength(0); // all bodies here are > 60 KB
+  });
+
+  it("gives every POST a timeout signal, so a hung request can't block close()", async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const ep = new EventProcessor({
+      url: "http://x/events",
+      flushIntervalMs: 1_000_000,
+      fetch: (async (_u: string, init: RequestInit) => {
+        signals.push(init.signal);
+        return new Response(null, { status: 202 });
+      }) as unknown as typeof fetch,
+    });
+    ep.track("k", { key: "u1" });
+    await ep.close();
+    expect(signals.length).toBe(1);
+    expect(signals[0] instanceof AbortSignal).toBe(true);
+    const t = requestTimeout(10);
+    expect(t.signal.aborted).toBe(false);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(t.signal.aborted).toBe(true);
+    const cleared = requestTimeout(10);
+    cleared.clear();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(cleared.signal.aborted).toBe(false);
   });
 });

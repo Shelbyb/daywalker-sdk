@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { Daywalker, daywalker, registerPublicKey, sha256Base64Url, verifyJwtLease, generateSigningKey } from "../src/index.js";
-import { createDpopProof, generateDpopKey, type DpopKey } from "../src/crypto/dpop.js";
+import { createDpopProof, generateDpopKey, verifyDpopProof, type DpopKey } from "../src/crypto/dpop.js";
 import { createDaywalkerMiddleware, withDaywalkerAuth } from "../src/next.js";
 import { daywalkerAuth as webAuth, readCredentials } from "../src/middleware.js";
 import { daywalkerAuth as expressAuth } from "../src/express.js";
@@ -63,6 +63,21 @@ describe("DPoP-bound access tokens (RFC 9449) are useless without the client's k
     // A proof for a different access token
     const otherAth = await createDpopProof(key, { method: "GET", url, accessToken: accessToken() });
     assert.match(((await client.validateToken(token, { dpop: { proof: otherAth, method: "GET", url } })) as any).message, /ath/);
+  });
+
+  it("never lets a non-finite maxAgeSeconds or currentTime switch off the proof's iat freshness check", async () => {
+    const key = await generateDpopKey();
+    const token = accessToken();
+    const url = "https://app.example.com/api/data";
+    const expectedJkt = await jktOf(key);
+    const base = { method: "GET", url, accessToken: token, expectedJkt };
+    const stale = await createDpopProof(key, { method: "GET", url, accessToken: token });
+    for (const maxAgeSeconds of [NaN, Infinity, -Infinity]) {
+      const res = await verifyDpopProof({ ...base, proof: stale, currentTime: now() + 3600, maxAgeSeconds });
+      assert.match(res.valid ? "" : res.error!, /iat/);
+    }
+    const fresh = await createDpopProof(key, { method: "GET", url, accessToken: token });
+    assert.equal((await verifyDpopProof({ ...base, proof: fresh, currentTime: NaN, maxAgeSeconds: NaN })).valid, true);
   });
 
   it("checks htu against publicOrigin when the app sits behind a proxy", async () => {

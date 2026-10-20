@@ -1,7 +1,7 @@
 import { Evaluator, MemoryStore, evaluateFlag, parseContext, type ContextInput, type EvaluationDetail, type FlagConfig, type FlagValue, type SegmentConfig } from "./engine/index.js";
 import { Emitter } from "./common/emitter.js";
 import { hmacSha256Hex } from "./common/hmac.js";
-import { EventProcessor, SDK_VERSION, SseClient, noopLogger, type Logger } from "./common/index.js";
+import { EventProcessor, SDK_VERSION, SseClient, noopLogger, requestTimeout, type Logger } from "./common/index.js";
 import type { FlagSet } from "./client.js";
 import { assertSecureUrl } from "../secure-url.js";
 
@@ -143,21 +143,33 @@ export class DevPulseNodeClient extends Emitter {
   private startPolling() {
     if (this.poller) return;
     const interval = Math.max(30_000, this.options.pollIntervalMs ?? 30_000);
+    let inFlight = false;
     const poll = async () => {
+      // A hung request must not pile up a new one every interval.
+      if (inFlight) return;
+      inFlight = true;
+      const timeout = requestTimeout();
       try {
-        const res = await (this.options.fetch ?? fetch)(`${this.base}/sdk/v1/server/flags`, { headers: { ...this.headers(), ...(this.etag ? { "if-none-match": this.etag } : {}) } });
+        const res = await (this.options.fetch ?? fetch)(`${this.base}/sdk/v1/server/flags`, { headers: { ...this.headers(), ...(this.etag ? { "if-none-match": this.etag } : {}) }, signal: timeout.signal });
         if (res.status === 304) {
           this.setStale(false);
           return this.markReady();
         }
-        if (res.status === 401 || res.status === 403) return this.fail(new Error("Invalid SDK key"));
+        if (res.status === 401 || res.status === 403) {
+          this.stopPolling(); // an invalid key won't start working on retry
+          return this.fail(new Error("Invalid SDK key"));
+        }
         if (!res.ok) throw new Error(`Poll failed with ${res.status}`);
-        this.etag = res.headers.get("etag");
+        const etag = res.headers.get("etag");
         this.applyPut((await res.json()) as { flags: Record<string, ServerFlag>; segments: Record<string, SegmentConfig> });
+        this.etag = etag;
         this.setStale(false);
       } catch (err) {
         this.logger.warn("DevPulse poll failed", err);
         this.setStale(true, err as Error);
+      } finally {
+        timeout.clear();
+        inFlight = false;
       }
     };
     this.poller = setInterval(poll, interval);
@@ -176,12 +188,17 @@ export class DevPulseNodeClient extends Emitter {
       if (type === "put") this.applyPut(payload.data);
       else if (type === "patch" || type === "delete") {
         const [, kind, key] = String(payload.path).split("/");
+        if (!key) throw new Error(`Bad path ${String(payload.path)}`);
         const isFlag = kind === "flags";
-        const prev = isFlag ? this.store.getFlag(key!) : this.store.getSegment(key!);
+        const prev = isFlag ? this.store.getFlag(key) : this.store.getSegment(key);
         if (type === "patch") this.store.upsert(isFlag ? "flag" : "segment", payload.data);
-        else if (!prev || prev.version < payload.version) (isFlag ? this.store.flags : this.store.segments).delete(key!);
-        if (isFlag) this.emitUpdate(key!);
-        else for (const f of this.store.flags.values()) if (JSON.stringify(f.rules).includes(`"${key}"`)) this.emitUpdate(f.key);
+        else if (typeof payload.version === "number" && (!prev || prev.version < payload.version)) {
+          // Keep a tombstone so a delayed patch with an older version can't resurrect it.
+          const tombstone = { key, version: payload.version, deleted: true } as FlagConfig & SegmentConfig;
+          (isFlag ? this.store.flags : this.store.segments).set(key, tombstone);
+        }
+        if (isFlag) this.emitUpdate(key);
+        else for (const f of this.store.flags.values()) if (!f.deleted && JSON.stringify(f.rules).includes(`"${key}"`)) this.emitUpdate(f.key);
       }
     } catch (err) {
       this.logger.error("Malformed stream event", err);
@@ -189,7 +206,7 @@ export class DevPulseNodeClient extends Emitter {
   }
 
   private applyPut(data: { flags: Record<string, ServerFlag>; segments: Record<string, SegmentConfig> }) {
-    const before = new Map([...this.store.flags.entries()].map(([k, f]) => [k, f.version]));
+    const before = new Map([...this.store.flags.entries()].filter(([, f]) => !f.deleted).map(([k, f]) => [k, f.version]));
     this.store.replace(data);
     for (const [k, f] of this.store.flags) if (before.get(k) !== f.version) this.emitUpdate(k);
     for (const k of before.keys()) if (!this.store.flags.has(k)) this.emitUpdate(k);
@@ -295,21 +312,23 @@ export class DevPulseNodeClient extends Emitter {
       return { valid: false, values: {}, toJSON: () => ({}) };
     }
     const evaluator = new Evaluator(this.store);
-    const state: FlagSet = {};
+    const entries: [string, FlagSet[string]][] = [];
     for (const f of this.store.flags.values() as IterableIterator<ServerFlag>) {
       if (f.deleted || (clientSideOnly && !f.clientSide)) continue;
       const { detail } = evaluator.evaluate(f, ctx);
       // Same shape as the DevPulse client endpoint, so client-side analytics and experiments keep working.
       const inExperiment = "inExperiment" in detail.reason && !!detail.reason.inExperiment;
-      state[f.key] = {
+      entries.push([f.key, {
         value: detail.value,
         variation: detail.variationIndex,
         version: f.version,
         ...(opts.withReasons || inExperiment ? { reason: detail.reason } : {}),
         ...(f.trackEvents || inExperiment ? { trackEvents: true } : {}),
         ...(inExperiment ? { trackReason: true } : {}),
-      };
+      }]);
     }
+    // Own properties only (fromEntries), so a flag key like `__proto__` can't replace the prototype.
+    const state: FlagSet = Object.fromEntries(entries);
     return { valid: this.initialized, values: Object.fromEntries(Object.entries(state).map(([k, v]) => [k, v.value])), toJSON: () => state };
   }
 

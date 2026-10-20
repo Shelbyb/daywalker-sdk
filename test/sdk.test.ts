@@ -28,7 +28,7 @@ import {
 } from "../src/index.js";
 import { withDaywalkerAuth, createDaywalkerMiddleware } from "../src/next.js";
 import { daywalkerAuth, daywalkerMiddleware } from "../src/middleware.js";
-import { withOAuth, type TokenRequestLog } from "./helpers/oauth.js";
+import { fakeAccessToken as fakeAccessTokenForSdk, withOAuth, type TokenRequestLog } from "./helpers/oauth.js";
 
 const vectors = JSON.parse(
   fs.readFileSync(new URL("../test-vectors/signing-rfc9421.json", import.meta.url), "utf8")
@@ -625,5 +625,73 @@ describe("Nonce, in-flight dedupe and negative cache", () => {
     await new Promise((r) => setTimeout(r, 60));
     await client.validateToken("tok");
     assert.strictEqual(calls, 2);
+  });
+});
+
+describe("Expiry of online answers and issued tokens", () => {
+  const online = (answer: () => Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    const state = { calls: 0 };
+    const client = new Daywalker({
+      apiKey: "srv_live_x",
+      serviceSlug: "sonalyze",
+      ...extra,
+      fetch: withOAuth(async () => {
+        state.calls++;
+        return Response.json(answer());
+      }),
+    });
+    return { client, state };
+  };
+
+  it("refuses a valid answer whose expiresAt is in the past", async () => {
+    for (const expiresAt of [new Date(Date.now() - 1000).toISOString(), Math.floor(Date.now() / 1000) - 5, Date.now() - 5000]) {
+      const { client } = online(() => ({ valid: true, serviceSlug: "sonalyze", expiresAt }));
+      const res = await client.validateToken("tok");
+      assert.deepStrictEqual(res.ok ? null : [res.status, res.error], [401, "EXPIRED"]);
+    }
+  });
+
+  it("never serves a cached answer past its expiresAt", async () => {
+    const { client, state } = online(() => ({ valid: true, serviceSlug: "sonalyze", data: { expiresAt: new Date(Date.now() + 50).toISOString() } }), { cacheTtlMs: 60_000 });
+    assert.strictEqual((await client.validateToken("tok")).ok, true);
+    assert.strictEqual((await client.validateToken("tok")).ok, true);
+    assert.strictEqual(state.calls, 1);
+    await new Promise((r) => setTimeout(r, 80));
+    assert.strictEqual((await client.validateToken("tok")).ok, true);
+    assert.strictEqual(state.calls, 2);
+  });
+
+  it("fails closed (503, not cached) when expiresAt can't be read", async () => {
+    for (const expiresAt of ["not a date", { at: 1 }, true]) {
+      const { client, state } = online(() => ({ valid: true, serviceSlug: "sonalyze", expiresAt }));
+      const res = await client.validateToken("tok");
+      assert.deepStrictEqual(res.ok ? null : [res.status, res.error], [503, "SERVICE_UNAVAILABLE"]);
+      await client.validateToken("tok");
+      assert.strictEqual(state.calls, 2);
+    }
+  });
+
+  it("accessToken() never hands back a token the server says has already expired", async () => {
+    const key = await generateSigningKey();
+    const client = new Daywalker({
+      env: {},
+      apiKey: "srv_live_x",
+      serviceSlug: "svc",
+      domain: "app.example.com",
+      signingKey: key.privateKeyPkcs8Base64,
+      fetch: withOAuth(async () => Response.json({}), {
+        tokenResponse: () =>
+          Response.json({
+            access_token: fakeAccessTokenForSdk(),
+            token_type: "DPoP",
+            expires_in: 900,
+            expires_at: Math.floor(Date.now() / 1000) - 10,
+            refresh_token: "rt_1",
+            refresh_expires_in: 3600,
+            services: ["svc"],
+          }),
+      }),
+    });
+    await assert.rejects(client.accessToken(), (e: any) => e instanceof DaywalkerAuthError && e.status === 502 && /already expired/.test(e.message));
   });
 });

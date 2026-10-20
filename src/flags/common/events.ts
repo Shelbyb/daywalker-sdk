@@ -190,12 +190,14 @@ export class EventProcessor {
       if (g.navigator.sendBeacon(this.opts.url, body)) return;
     }
     for (let attempt = 0; attempt < 2; attempt++) {
+      const timeout = requestTimeout();
       try {
         const res = await (this.opts.fetch ?? fetch)(this.opts.url, {
           method: "POST",
           headers: { "content-type": "application/json", ...this.opts.headers },
           body,
           keepalive: bytes < KEEPALIVE_MAX_BYTES,
+          signal: timeout.signal,
         });
         if (res.ok) return;
         if (res.status === 401 || res.status === 403) {
@@ -205,6 +207,8 @@ export class EventProcessor {
         if (res.status < 500 && res.status !== 429) return this.logger.warn(`Events rejected (${res.status})`);
       } catch (err) {
         if (attempt === 1) this.logger.warn("Failed to send events", err);
+      } finally {
+        timeout.clear();
       }
       if (attempt === 0) await new Promise((r) => unrefTimer(setTimeout(r, 1000)));
     }
@@ -229,6 +233,16 @@ const byteLength = (s: string) => encoder.encode(s).length;
 function unrefTimer(t: ReturnType<typeof setTimeout>) {
   (t as { unref?: () => void }).unref?.();
   return t;
+}
+
+/** Default timeout for SDK HTTP requests (flags, polling, events), so a stalled server can't hang them. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
+/** An abort signal that fires after `ms` (AbortController + timer: AbortSignal.timeout isn't available everywhere). */
+export function requestTimeout(ms = REQUEST_TIMEOUT_MS): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController();
+  const timer = unrefTimer(setTimeout(() => controller.abort(), ms));
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
 }
 
 /** Split events into JSON array bodies of at most MAX_EVENTS_PER_REQUEST events and MAX_REQUEST_BYTES bytes. */

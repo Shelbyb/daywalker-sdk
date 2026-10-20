@@ -79,3 +79,13 @@ describe("webhooks: verifyWebhook", () => {
     expect(isEventType(e, "slo.*")).toBe(false);
   });
 });
+
+describe("webhooks: hardening", () => {
+  it("fails closed when toleranceSeconds or now is NaN instead of skipping the timestamp check", async () => {
+    const old = now - 10 * 365 * 86400;
+    const h = { "webhook-id": "msg_1", "webhook-timestamp": String(old), "webhook-signature": await signWebhook(SECRET, "msg_1", old, body) };
+    expect(await code(verifyWebhook({ secret: SECRET, headers: h, body, now: now * 1000, toleranceSeconds: Number(undefined) }))).toBe("TIMESTAMP_OUT_OF_TOLERANCE");
+    expect(await code(verifyWebhook({ secret: SECRET, headers: await hdrs(), body, now: Number.NaN }))).toBe("TIMESTAMP_OUT_OF_TOLERANCE");
+    expect((await verifyWebhook({ secret: SECRET, headers: await hdrs(), body, now: now * 1000, toleranceSeconds: 0 })).type).toBe("cron.failed");
+  });
+});

@@ -191,6 +191,27 @@ describe("React bindings: client", { skip }, () => {
     }
   });
 
+  it("re-renders on changes to flags named like Object.prototype members (constructor)", async () => {
+    const env = await setup();
+    try {
+      const { DevPulseProvider, useFlag } = env.bindings;
+      const net = fakeFetch();
+      const App = () => h("span", null, useFlag("constructor", "dflt"));
+      await env.render(h(DevPulseProvider, { clientSideId: "cs", context: { key: "u1" }, options: { baseUrl: "https://x", sendEvents: false, fetch: net.f }, children: h(App) }));
+      await flush();
+      const live = net.streams.filter((s) => !s.signal?.aborted)[0]!;
+      live.push('event: put\ndata: {"constructor":{"value":"one","variation":0,"version":1}}\n\n');
+      await flush();
+      expect(env.container.textContent).toBe("one");
+      live.push('event: patch\ndata: {"key":"constructor","value":"two","variation":1,"version":2}\n\n');
+      await flush();
+      expect(env.container.textContent).toBe("two");
+      await env.unmount();
+    } finally {
+      env.teardown();
+    }
+  });
+
   it("first client render uses bootstrap without a request, then goes live", async () => {
     const env = await setup();
     try {

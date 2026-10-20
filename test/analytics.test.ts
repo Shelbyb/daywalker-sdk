@@ -217,4 +217,65 @@ describe("analytics in a browser", () => {
       b.restore();
     }
   });
+
+  it("ignores a corrupted persisted state instead of throwing", async () => {
+    const b = await browser("https://app.example.com/");
+    const g = globalThis as Record<string, unknown>;
+    const saved = Object.getOwnPropertyDescriptor(g, "localStorage");
+    const data: Record<string, string> = { dp_analytics_dpa_c1: '"oops"', dp_analytics_dpa_c2: "[1]", dp_analytics_dpa_c3: '{"distinctId":"kept","identified":false,"props":{}}' };
+    Object.defineProperty(g, "localStorage", { value: { getItem: (k: string) => data[k] ?? null, setItem: (k: string, v: string) => void (data[k] = v) }, configurable: true, writable: true });
+    try {
+      const f = fakeFetch();
+      for (const key of ["dpa_c1", "dpa_c2"]) {
+        const a = b.mod.createAnalytics({ writeKey: key, host: "https://dp", fetch: f.fetch, autocapturePageviews: false });
+        expect(a.getDistinctId()).toMatch(/^[0-9a-f-]{36}$/);
+        await a.shutdown();
+      }
+      const kept = b.mod.createAnalytics({ writeKey: "dpa_c3", host: "https://dp", fetch: f.fetch, autocapturePageviews: false });
+      expect(kept.getDistinctId()).toBe("kept");
+      await kept.shutdown();
+    } finally {
+      if (saved) Object.defineProperty(g, "localStorage", saved);
+      else delete g.localStorage;
+      b.restore();
+    }
+  });
+});
+
+describe("analytics hardening", () => {
+  it("times out a hung request, requeues it and keeps flush() from hanging", async () => {
+    let calls = 0;
+    const fetch = ((_u: string, init: RequestInit) => {
+      calls++;
+      return new Promise((_r, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason)));
+    }) as unknown as typeof globalThis.fetch;
+    const errors: Error[] = [];
+    const a = createAnalytics({ writeKey: "dpa_t", host: "https://dp", fetch, timeoutMs: 20, onError: (e) => errors.push(e) });
+    a.capture("x");
+    await a.flush();
+    expect(calls).toBe(1);
+    expect(errors[0]!.name).toBe("TimeoutError");
+    const f = fakeFetch();
+    const b = createAnalytics({ writeKey: "dpa_t", host: "https://dp", fetch: f.fetch, timeoutMs: 0 });
+    b.capture("y");
+    await b.flush();
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it("re-applies maxQueueSize when a failed batch is requeued", async () => {
+    let release: ((r: Response) => void) | undefined;
+    let n = 0;
+    const fetch = (() => (n++ ? Promise.resolve(new Response(null, { status: 200 })) : new Promise<Response>((r) => (release = r)))) as unknown as typeof globalThis.fetch;
+    const a = createAnalytics({ writeKey: "dpa_t", host: "https://dp", fetch, maxQueueSize: 5, flushAt: 1000 });
+    for (let i = 0; i < 5; i++) a.capture(`old${i}`);
+    const p = a.flush();
+    await new Promise((r) => setTimeout(r, 0));
+    for (let i = 0; i < 5; i++) a.capture(`new${i}`);
+    release!(new Response(null, { status: 503 }));
+    await p;
+    const queue = (a as unknown as { queue: { event: string }[] }).queue;
+    expect(queue.map((e) => e.event)).toEqual(["new0", "new1", "new2", "new3", "new4"]);
+    await a.shutdown();
+    expect(n).toBe(2);
+  });
 });

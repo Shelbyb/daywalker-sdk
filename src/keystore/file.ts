@@ -27,7 +27,8 @@ export function fileKeyStore(options: FileKeyStoreOptions = {}): KeyStore {
   async function load(): Promise<StoredSigningKey | null> {
     let handle: fs.FileHandle;
     try {
-      handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      // O_NONBLOCK: a FIFO at the path would otherwise block here, before the regular-file check.
+      handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") return null;
@@ -42,7 +43,14 @@ export function fileKeyStore(options: FileKeyStoreOptions = {}): KeyStore {
         if (uid !== undefined && stat.uid !== uid) throw new Error(`${file} is not owned by this user`);
       }
       if (stat.size > MAX_FILE_BYTES) throw new Error(`${file} is too large to be a signing key`);
-      return parseStoredSigningKey(JSON.parse(await handle.readFile("utf8")));
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(await handle.readFile("utf8"));
+      } catch {
+        // JSON.parse's message quotes part of the input, i.e. of the private key.
+        throw new Error(`${file} is not valid JSON`);
+      }
+      return parseStoredSigningKey(parsed);
     } finally {
       await handle.close();
     }

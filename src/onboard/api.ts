@@ -1,4 +1,8 @@
+import { assertSecureUrl } from "../secure-url.js";
+
 export const DEFAULT_AUTH_URL = "https://auth.daywalker.dev";
+/** Per-attempt timeout for onboarding calls. */
+export const ONBOARD_API_TIMEOUT_MS = 15_000;
 
 export class OnboardApiError extends Error {
   constructor(
@@ -18,13 +22,25 @@ export interface ApiOptions {
   fetchImpl?: typeof fetch;
   retries?: number;
   baseDelayMs?: number;
+  timeoutMs?: number;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Small JSON client for Daywalker Auth. Retries network errors and 5xx for GET, and 429 for any method. */
-export function createApi({ baseUrl = DEFAULT_AUTH_URL, fetchImpl = globalThis.fetch, retries = 2, baseDelayMs = 400 }: ApiOptions = {}): OnboardApi {
-  const base = baseUrl.replace(/\/+$/, "");
+/**
+ * Small JSON client for Daywalker Auth. Retries network errors and 5xx for GET, and 429 for any method.
+ * Passwords, session tokens and API tokens travel through it, so the base URL must be https (http only for
+ * localhost), redirects are refused and every attempt times out.
+ */
+export function createApi({
+  baseUrl = DEFAULT_AUTH_URL,
+  fetchImpl = globalThis.fetch,
+  retries = 2,
+  baseDelayMs = 400,
+  timeoutMs = ONBOARD_API_TIMEOUT_MS,
+}: ApiOptions = {}): OnboardApi {
+  const base = baseUrl.trim().replace(/\/+$/, "");
+  assertSecureUrl("DAYWALKER_AUTH_URL", base);
   return async function api(path, { method = "GET", body, token } = {}) {
     const idempotent = method === "GET";
     for (let attempt = 0; ; attempt++) {
@@ -38,6 +54,8 @@ export function createApi({ baseUrl = DEFAULT_AUTH_URL, fetchImpl = globalThis.f
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: body ? JSON.stringify(body) : undefined,
+          redirect: "error",
+          signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (err) {
         if (!idempotent || attempt >= retries) throw new OnboardApiError(0, `Network error: ${(err as Error).message}`);

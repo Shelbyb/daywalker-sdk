@@ -64,6 +64,8 @@ function loadState(file: string): OnboardState {
 function saveState(file: string, state: OnboardState, dryRun: boolean) {
   if (dryRun) return;
   const { stage, name, email, domain, service } = state;
+  // Never write through a symlink (a checked-in one could point at any file the user can write).
+  if (fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`${STATE_FILE} is a symlink; refusing to write through it`);
   fs.writeFileSync(file, `${JSON.stringify({ stage, name, email, domain, service }, null, 2)}\n`, { mode: 0o600 });
 }
 
@@ -125,11 +127,12 @@ export async function runOnboard(opts: OnboardOptions, deps: OnboardDeps, ctx: O
   const dry = Boolean(opts["dry-run"]);
   const interactive = ctx.prompter !== undefined ? ctx.prompter !== null : Boolean(process.stdin.isTTY) && !opts.yes;
   const prompter = ctx.prompter !== undefined ? ctx.prompter : interactive ? createPrompter() : null;
-  const api = ctx.api ?? createApi({ baseUrl: str(opts["auth-url"]) || env.DAYWALKER_AUTH_URL || DEFAULT_AUTH_URL });
+  const authUrl = str(opts["auth-url"]) || env.DAYWALKER_AUTH_URL || DEFAULT_AUTH_URL;
   const statePath = path.join(cwd, STATE_FILE);
   const envFile = path.join(cwd, ".env.local");
 
   try {
+    const api = ctx.api ?? createApi({ baseUrl: authUrl });
     if (dry) log("Dry run: no network calls, no files written.\n");
     const state = loadState(statePath);
     let requestedService = str(opts.service) || state.service || "";
@@ -218,7 +221,8 @@ export async function runOnboard(opts: OnboardOptions, deps: OnboardDeps, ctx: O
     if (!slug || !host) throw new Error(`Saved state is incomplete; delete ${STATE_FILE} and re-run.`);
 
     if (!stageAtLeast(state, "registered")) {
-      await deps.init({ service: slug, domain: host });
+      // Register the key with the same Daywalker Auth the token was created on.
+      await deps.init({ service: slug, domain: host, ...(authUrl !== DEFAULT_AUTH_URL ? { "auth-url": authUrl } : {}) });
       state.stage = "registered";
       saveState(statePath, state, dry);
     }

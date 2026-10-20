@@ -1,5 +1,5 @@
 import type { ContextInput, EvaluationReason, FlagValue } from "./engine/index.js";
-import { EventProcessor, SDK_VERSION, SseClient, encodeContext, noopLogger, type Logger } from "./common/index.js";
+import { EventProcessor, SDK_VERSION, SseClient, encodeContext, noopLogger, requestTimeout, type Logger } from "./common/index.js";
 import { assertSecureUrl } from "../secure-url.js";
 
 export type { ContextInput, EvaluationReason, FlagValue, Logger };
@@ -72,6 +72,8 @@ function isFlagSet(x: unknown): x is FlagSet {
  */
 export class DevPulseClient {
   private flags: FlagSet = flagMap();
+  /** Versions of flags deleted since the last full load, so an older patch can't resurrect them. */
+  private deleted = new Map<string, number>();
   private listeners = new Map<string, Set<Listener>>();
   private stream: SseClient | null = null;
   private events: EventProcessor | null = null;
@@ -187,9 +189,14 @@ export class DevPulseClient {
   }
 
   private async fetchFlags(): Promise<FlagSet> {
-    const res = await (this.options.fetch ?? fetch)(`${this.base}/sdk/v1/client/${encodeURIComponent(this.clientSideId)}/flags?${this.query()}`);
-    if (!res.ok) throw new Error(`Flag request failed with ${res.status}`);
-    return (await res.json()) as FlagSet;
+    const timeout = requestTimeout();
+    try {
+      const res = await (this.options.fetch ?? fetch)(`${this.base}/sdk/v1/client/${encodeURIComponent(this.clientSideId)}/flags?${this.query()}`, { signal: timeout.signal });
+      if (!res.ok) throw new Error(`Flag request failed with ${res.status}`);
+      return (await res.json()) as FlagSet;
+    } finally {
+      timeout.clear();
+    }
   }
 
   private onStreamEvent(type: string, data: string) {
@@ -198,15 +205,21 @@ export class DevPulseClient {
       if (type === "put") this.replaceAll(payload as FlagSet);
       else if (type === "patch") {
         const { key, ...state } = payload as FlagState & { key: string };
+        if (typeof key !== "string" || typeof state.version !== "number") throw new Error("patch without key or version");
         const prev = this.flag(key);
         if (prev && prev.version > state.version) return;
+        if ((this.deleted.get(key) ?? -Infinity) >= state.version) return;
+        this.deleted.delete(key);
         this.flags[key] = state;
         this.emitChanges({ [key]: { current: state.value, previous: prev?.value } });
         this.writeCache();
       } else if (type === "delete") {
         const { key, version } = payload as { key: string; version: number };
+        if (typeof key !== "string" || typeof version !== "number") throw new Error("delete without key or version");
         const prev = this.flag(key);
-        if (!prev || prev.version > version) return;
+        if (prev ? prev.version > version : (this.deleted.get(key) ?? -Infinity) >= version) return;
+        this.deleted.set(key, version);
+        if (!prev) return;
         delete this.flags[key];
         this.emitChanges({ [key]: { current: null, previous: prev.value } });
         this.writeCache();
@@ -217,13 +230,14 @@ export class DevPulseClient {
   }
 
   private replaceAll(next: FlagSet) {
-    const changes: ChangeSet = {};
+    const changes: ChangeSet = Object.create(null) as ChangeSet;
     for (const key of new Set([...Object.keys(this.flags), ...Object.keys(next)])) {
       const a = this.flag(key)?.value;
       const b = Object.hasOwn(next, key) ? next[key]?.value : undefined;
       if (JSON.stringify(a) !== JSON.stringify(b)) changes[key] = { current: b ?? null, previous: a };
     }
     this.flags = flagMap(next);
+    this.deleted.clear();
     this.writeCache();
     this.markReady();
     if (Object.keys(changes).length) this.emitChanges(changes);
@@ -382,7 +396,8 @@ export class DevPulseClient {
   }
 
   off(event: string, fn: Listener) {
-    this.listeners.get(event)?.delete(fn);
+    const set = this.listeners.get(event);
+    if (set?.delete(fn) && !set.size) this.listeners.delete(event);
   }
 
   private emit(event: string, ...args: unknown[]) {

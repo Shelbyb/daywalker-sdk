@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.19.0
+- **Security fixes:**
+  - **Token expiry.** Expired tokens are now always refused:
+    - Offline verification checks `iat`, and a non-finite `currentTime`, clock skew or DPoP `maxAgeSeconds` falls back to the defaults.
+    - An online "valid" answer is cached for no longer than it stays valid, and one that has already expired is refused (`EXPIRED`).
+    - `accessToken()` and `fetchBundle()` never return credentials that have already expired.
+  - **HTTPS and redirects.** These clients now require HTTPS (plain HTTP only for localhost), with request timeouts and no redirects:
+    - `onboard`
+    - the CLI `--auth-url`
+    - the management client
+    - the API client's token request
+  - **Path traversal.** `ApiClient` rejects `.` and `..` path segments.
+  - **Webhooks.** A NaN tolerance no longer turns off replay protection.
+  - **`daywalker license apply`.** It no longer writes outside `--dir` or through symlinks.
+- **Leaks:**
+  - Secrets no longer appear in error messages (key file, secrets JSON, URLs) or in `console.log` output of clients.
+  - Flags, analytics and polling requests time out.
+  - Unhandled rejections from background flushes are gone.
+  - Bounds and cleanup fixes are in the flags, analytics, logs and SLO clients.
+- **Flags:** a deleted flag can't be brought back by a stale patch, and keys like `__proto__` and `constructor` are handled safely.
+
 ## 0.18.2
 - **Examples:** adds `examples/auth-signed-oauth-token.ts`, showing how to sign the `POST /api/v1/oauth/token` request with `signRequest`. Errors from the management client are `DaywalkerManagementError` (`status`, `code`). No code changes.
 
@@ -60,9 +81,9 @@
 - `fetchBundle()` errors now name the request and HTTP status (`Bundle request for <slug> failed (HTTP 401): ...`) and always carry a code: the service's `code`/`error`, otherwise derived from the status (`INVALID_TOKEN`, `FORBIDDEN`, `SERVICE_NOT_FOUND`, `RATE_LIMITED`, `SERVICE_UNAVAILABLE`, `BUNDLE_REQUEST_FAILED`).
 
 ## 0.9.0
-**Per-service license keys, sealed config bundle, and tamper resistance.** Adds technical enforcement ensuring consumer apps cannot bypass Daywalker verification without breaking functionality.
-- `client.getLicense({ serviceSlug?, forceRefresh? })`: returns `{ serviceSlug, licenseKey, expiresAt }`. The derived key is computed as HKDF-SHA256(serviceSecret, salt = serviceSlug + keyId + hourWindow, info = "daywalker-license-v1") and cached in memory until shortly before expiry.
-- `client.fetchBundle({ serviceSlug?, forceRefresh? })`: returns decrypted JSON config bundle (`{ serviceSlug, dataKeySalt, features, issuedAt, expiresAt }`) sealed with AES-256-GCM under the derived license key.
+**Per-service license keys and sealed config bundle.**
+- `client.getLicense({ serviceSlug?, forceRefresh? })`: returns `{ serviceSlug, licenseKey, expiresAt }`, cached in memory until shortly before expiry.
+- `client.fetchBundle({ serviceSlug?, forceRefresh? })`: returns the decrypted config bundle (`{ serviceSlug, dataKeySalt, features, issuedAt, expiresAt }`).
 - Revocation handling: throws `DaywalkerAuthError` on `SERVICE_REVOKED`, `SERVICE_SUSPENDED`, `DOMAIN_REVOKED`, or `DOMAIN_MISMATCH`.
 - Backward compatible with `validateServiceCredentials()` and requires no new environment variables.
 - Exported types: `License`, `LicenseOptions`, `ConfigBundle`.
@@ -201,5 +222,5 @@ Security fixes. Released as a minor version (not 0.2.1) because several changes 
 - New `negativeCacheTtlMs` config (default 3000ms, 0 disables) briefly caches failed validations; 429 and network errors are never cached.
 - Server (`daywalker-api-service`) already keys replays on the signature hash and signs the raw `Signature-Input` params, so the nonce makes signatures unique; older SDKs without a nonce remain accepted.
 
-## Unreleased
+## 0.19.0
 - Added `createManagementClient` (tokens, logs, keys), `verifyAccessToken`, `unsealBundle`, `createDpopProof`/`generateDpopKey` root exports, typed `service_limits` helpers.

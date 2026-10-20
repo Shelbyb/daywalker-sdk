@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createDaywalker } from "./client.js";
+import { assertSecureUrl } from "./secure-url.js";
 import { parseServiceSlugs, publicHostname } from "./config.js";
 import { runOnboard } from "./onboard/index.js";
 import { applyLicense, checkLicense, formatReport } from "./license/index.js";
@@ -88,6 +89,19 @@ async function resolveApiKey(opts: Record<string, string | boolean>, existing: M
     return fromStdin;
   }
   return String(existing.get("DAYWALKER_API_KEY") ?? process.env.DAYWALKER_API_KEY ?? "").trim() || null;
+}
+
+/** Daywalker Auth URL from --auth-url, .env.local or the environment; refuses anything but https (http only for localhost). */
+function resolveAuthUrl(opts: Record<string, string | boolean>, existing: Map<string, string>): string {
+  const raw = opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev";
+  if (typeof raw !== "string") fail("--auth-url needs a URL");
+  const authUrl = raw.trim().replace(/\/+$/, "");
+  try {
+    assertSecureUrl("DAYWALKER_AUTH_URL", authUrl);
+  } catch (err) {
+    fail(`${(err as Error).message}; refusing to send the API key there`);
+  }
+  return authUrl;
 }
 
 /** Why a key API call failed, with what to do when the domain is full. */
@@ -222,8 +236,8 @@ async function init(opts: Record<string, string | boolean>) {
     if (!domain) fail(`--domain (${rawDomain}) is not a valid public hostname`);
   }
 
+  const authUrl = resolveAuthUrl(opts, existing);
   const apiKey = await resolveApiKey(opts, existing);
-  const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
 
   const existingKey = existing.get("DAYWALKER_SIGNING_KEY") || null;
   const keyExists = Boolean(existingKey) && !opts.force;
@@ -307,8 +321,8 @@ async function rotate(opts: Record<string, string | boolean>) {
   if (!current) fail("No DAYWALKER_SIGNING_KEY found; run `daywalker init` first");
 
   const slug = parseServiceSlugs(String(opts.service ?? existing.get("DAYWALKER_SERVICE_SLUG") ?? process.env.DAYWALKER_SERVICE_SLUG ?? "")).join(",");
+  const authUrl = resolveAuthUrl(opts, existing);
   const apiKey = await resolveApiKey(opts, existing);
-  const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
 
   const rotateDomain = publicHostname(String(opts.domain ?? existing.get("DAYWALKER_DOMAIN") ?? process.env.DAYWALKER_DOMAIN ?? ""));
   const key = await generateSigningKey();
@@ -389,11 +403,11 @@ async function check(opts: Record<string, string | boolean>) {
 /** Domain, API key and auth URL for the key commands, from flags, .env.local or the environment. */
 async function keyCommandContext(opts: Record<string, string | boolean>) {
   const existing = readEnvFile(path.join(process.cwd(), ".env.local"));
+  const authUrl = resolveAuthUrl(opts, existing);
   const apiKey = await resolveApiKey(opts, existing);
   if (!apiKey) fail("Set DAYWALKER_API_KEY (or pipe it to --api-key-stdin)");
   const rawDomain = String(opts.domain ?? existing.get("DAYWALKER_DOMAIN") ?? process.env.DAYWALKER_DOMAIN ?? "");
   const domain = publicHostname(rawDomain);
-  const authUrl = String(opts["auth-url"] ?? existing.get("DAYWALKER_AUTH_URL") ?? process.env.DAYWALKER_AUTH_URL ?? "https://auth.daywalker.dev").replace(/\/+$/, "");
   const currentKid = existing.get("DAYWALKER_KEY_ID") ?? process.env.DAYWALKER_KEY_ID ?? null;
   const previous = existing.get("DAYWALKER_SIGNING_KEY_PREVIOUS") ?? process.env.DAYWALKER_SIGNING_KEY_PREVIOUS;
   const previousKid = previous ? ((await loadSigningKey(previous).catch(() => null))?.publicJwk.kid ?? null) : null;

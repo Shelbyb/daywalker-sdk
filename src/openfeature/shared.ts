@@ -12,12 +12,14 @@ function toJsonValue(v: unknown): unknown {
   if (v instanceof Date) return Number.isNaN(v.getTime()) ? undefined : v.toISOString();
   if (Array.isArray(v)) return v.map(toJsonValue);
   if (v && typeof v === "object") {
-    const out: Record<string, unknown> = {};
+    // fromEntries defines own properties: a `__proto__` key stays plain data instead of becoming
+    // the prototype (through which `targetingKey` / `kind` would otherwise be inherited).
+    const out: [string, unknown][] = [];
     for (const [k, x] of Object.entries(v)) {
       const j = toJsonValue(x);
-      if (j !== undefined) out[k] = j;
+      if (j !== undefined) out.push([k, j]);
     }
-    return out;
+    return Object.fromEntries(out);
   }
   return v;
 }

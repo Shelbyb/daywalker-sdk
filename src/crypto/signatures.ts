@@ -493,7 +493,8 @@ export const MAX_JWT_LENGTH = 16_384;
 
 /**
  * Zero-egress offline verification of Daywalker access tokens (RFC 9068 JWTs from the OAuth token endpoint).
- * Requires `typ: at+jwt`, `alg: EdDSA`, a `jti`, a numeric `exp`, and an `aud` containing `expectedServiceSlug`
+ * Requires `typ: at+jwt`, `alg: EdDSA`, a `jti`, a numeric `exp` (and a numeric `nbf` / `iat` not in the future
+ * when present), and an `aud` containing `expectedServiceSlug`
  * (a verifier without an expected slug rejects every token). `iss` is checked when `expectedIssuer` is set.
  * Segments must be canonical unpadded base64url, a `crit` header is rejected, and a JWKS `publicKey` is
  * searched by the header's `kid`. A token with `cnf.jkt` is DPoP-bound: the caller must also check its
@@ -563,8 +564,9 @@ export async function verifyJwtLease(params: {
       return { valid: false, error: "JWT signature verification failed" };
     }
 
-    const now = params.currentTime ?? Math.floor(Date.now() / 1000);
-    const skew = Math.max(0, Math.min(params.clockSkewSeconds ?? JWT_CLOCK_SKEW_SECONDS, JWT_CLOCK_SKEW_SECONDS));
+    const now = Number.isFinite(params.currentTime) ? (params.currentTime as number) : Math.floor(Date.now() / 1000);
+    const skewOption = Number.isFinite(params.clockSkewSeconds) ? (params.clockSkewSeconds as number) : JWT_CLOCK_SKEW_SECONDS;
+    const skew = Math.max(0, Math.min(skewOption, JWT_CLOCK_SKEW_SECONDS));
     if (typeof payload.jti !== "string" || payload.jti === "") {
       return { valid: false, error: "JWT has no jti claim" };
     }
@@ -574,8 +576,11 @@ export async function verifyJwtLease(params: {
     if (payload.exp + skew <= now) {
       return { valid: false, error: "JWT token lease has expired" };
     }
-    if (payload.nbf !== undefined && (typeof payload.nbf !== "number" || payload.nbf > now + skew)) {
+    if (payload.nbf !== undefined && (typeof payload.nbf !== "number" || Number.isNaN(payload.nbf) || payload.nbf > now + skew)) {
       return { valid: false, error: "JWT token lease not active yet" };
+    }
+    if (payload.iat !== undefined && (typeof payload.iat !== "number" || !Number.isFinite(payload.iat) || payload.iat > now + skew)) {
+      return { valid: false, error: "JWT token lease iat is not a number or is in the future" };
     }
 
     const expected = params.expectedServiceSlug?.trim().toLowerCase();

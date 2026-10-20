@@ -378,3 +378,98 @@ describe("slo and deploys", () => {
     expect((await rejects(recordDeploy(a, "web", { environment: "" }))).message).toMatch(/environment/);
   });
 });
+
+describe("hardening", () => {
+  const unhandled = async (run: () => Promise<void>) => {
+    const seen: unknown[] = [];
+    const on = (r: unknown) => void seen.push(r);
+    process.on("unhandledRejection", on);
+    try {
+      await run();
+      await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      process.off("unhandledRejection", on);
+    }
+    return seen;
+  };
+
+  it("cron keeps the ping token out of util.inspect", async () => {
+    const { inspect } = await import("node:util");
+    const cron = createCronMonitor({ pingUrl: "https://dp.example.com/ping/tok_SECRET", fetch: mock().fetch, timeoutMs: 5 });
+    expect(inspect(cron, { depth: 5 })).not.toMatch(/tok_SECRET/);
+  });
+
+  it("oncall enforces the 512 KB limit in bytes, not UTF-16 units", async () => {
+    const m = mock(() => new Response("", { status: 202 }));
+    const oc = createOncall({ host: "https://dp.example.com", routingKey: "rk", fetch: m.fetch });
+    expect((await rejects(oc.trigger({ summary: "x", customDetails: { big: "é".repeat(300 * 1024) } }))).message).toMatch(/512 KB/);
+    expect(m.calls).toHaveLength(0);
+  });
+
+  it("logs: a throwing onError in a background flush is not an unhandled rejection", async () => {
+    const m = mock(() => new Response("bad", { status: 400 }));
+    let errors = 0;
+    const seen = await unhandled(async () => {
+      const log = createLogger({ host: "https://dp.example.com", token: "dpl_x", fetch: m.fetch, flushIntervalMs: 5, flushAt: 1, onError: () => {
+        errors++;
+        throw new Error("boom");
+      } });
+      log.info("a");
+      await new Promise((r) => setTimeout(r, 30));
+      log.info("b");
+      await rejects(log.shutdown());
+    });
+    expect(errors >= 2).toBe(true);
+    expect(seen).toEqual([]);
+  });
+
+  it("secrets: invalid JSON errors never quote the response body", async () => {
+    const m = mock(() => new Response('{"secrets":{"DB_PASSWORD":"hunter2-very-secret"'));
+    const err = await rejects(fetchSecrets({ host: "https://dp.example.com", token: "dps_abc", fetch: m.fetch }));
+    expect(err.message).toBe("Secrets response is not valid JSON");
+    expect(String(err.stack)).not.toMatch(/hunter2/);
+  });
+
+  it("parseDotenv: comments after quoted values, empty values and no prototype pollution", () => {
+    const out = parseDotenv('A="x y" # note\nB=\nC=3\nD=\'q\' #c\r\n__proto__=p\nconstructor=c\n');
+    expect({ ...out }).toEqual({ A: "x y", B: "", C: "3", D: "q", ["__proto__"]: "p", constructor: "c" });
+    expect(Object.getPrototypeOf(out)).toBe(null);
+    expect(({} as Record<string, unknown>).p).toBeUndefined();
+  });
+
+  it("loadSecrets skips __proto__ and treats inherited names as unset", async () => {
+    const m = mock(() => new Response('{"secrets":{"__proto__":"x","toString":"t","A":"1"}}'));
+    const env: Record<string, string | undefined> = {};
+    const r = await loadSecrets({ host: "https://dp.example.com", token: "dps_abc", fetch: m.fetch, env });
+    expect(r.skipped).toEqual(["__proto__"]);
+    expect(r.loaded).toEqual(["toString", "A"]);
+    expect(Object.getPrototypeOf(env)).toBe(Object.prototype);
+    expect(env.A).toBe("1");
+    expect(env.toString).toBe("t");
+  });
+
+  it("slo: rejects invalid dates and survives a throwing onError on the timer", async () => {
+    const slo0 = createSloReporter({ api: { post: (async () => ({})) as never }, project: "p", slo: "s", flushIntervalMs: 0 });
+    expect(() => slo0.record(1, 1, new Date("nope"))).toThrow(/valid Date/);
+    let errors = 0;
+    const seen = await unhandled(async () => {
+      const slo = createSloReporter({
+        api: { post: (async () => {
+          throw new Error("network");
+        }) as never },
+        project: "p",
+        slo: "s",
+        flushIntervalMs: 5,
+        onError: () => {
+          errors++;
+          throw new Error("boom");
+        },
+      });
+      slo.observe(true);
+      await new Promise((r) => setTimeout(r, 30));
+      await slo.shutdown();
+    });
+    expect(errors).toBe(1);
+    expect(seen).toEqual([]);
+  });
+});
