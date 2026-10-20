@@ -1,10 +1,11 @@
 /**
  * The text `daywalker license apply` installs. LICENSE_TEXT was reviewed and redrafted from the original
- * custom license (see docs/license.md); it is not legal advice, and the governing-law line is an owner decision.
+ * custom license (see docs/license.md); it is not legal advice. Governing law defaults to North Carolina.
  */
 
-/** The placeholder in LICENSE_TEXT that `--governing-law` replaces. */
-export const GOVERNING_LAW_PLACEHOLDER = "[GOVERNING LAW / VENUE: owner to\ndecide]";
+/** The governing law and venue in LICENSE_TEXT (North Carolina, where the Licensor is based); `--governing-law` replaces it. */
+export const DEFAULT_GOVERNING_LAW =
+  "the State of North Carolina, USA, with exclusive venue in the state and federal courts located in North Carolina";
 
 export const LICENSE_TEXT = `DevPulse Source-Available License, Version 1.0
 
@@ -150,11 +151,24 @@ SOFTWARE.
 
 10. GENERAL
 
-This license is governed by the laws of [GOVERNING LAW / VENUE: owner to
-decide], excluding its conflict-of-laws rules. A Commercial Tier agreement
-prevails over this license to the extent they conflict. If any provision is
-held unenforceable, the rest remains in effect. The Software is
-source-available; it is not open source software.
+This license is governed by the laws of the State of North Carolina, USA, with
+exclusive venue in the state and federal courts located in North Carolina,
+excluding its conflict-of-laws rules, except as provided in the next
+paragraph.
+
+Injunctive relief anywhere. Despite the exclusive venue above, the Licensor may
+seek an injunction or other equitable relief in any court of competent
+jurisdiction, in any country, to stop or prevent a violation of Section 2 or 3
+or the infringement or misappropriation of the Licensor's intellectual
+property rights. You consent to the jurisdiction of those courts for that
+purpose. You agree that a violation of Section 2 or 3 would cause the Licensor
+harm that money alone cannot repair, and that the Licensor may seek such relief
+without proving actual damages and, to the extent the court allows, without
+posting a bond.
+
+A Commercial Tier agreement prevails over this license to the extent they
+conflict. If any provision is held unenforceable, the rest remains in effect.
+The Software is source-available; it is not open source software.
 `;
 
 /** Present in every notice header; `check` and `apply` look for it. */

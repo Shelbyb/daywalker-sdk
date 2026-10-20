@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import { BOOT_NOTICE, GOVERNING_LAW_PLACEHOLDER, HEADER_COMMENT, HEADER_MARKER, LICENSE_TEXT, README_SECTION } from "./templates.js";
+import { BOOT_NOTICE, DEFAULT_GOVERNING_LAW, HEADER_COMMENT, HEADER_MARKER, LICENSE_TEXT, README_SECTION } from "./templates.js";
 
-export { BOOT_NOTICE, GOVERNING_LAW_PLACEHOLDER, HEADER_COMMENT, LICENSE_TEXT, README_SECTION };
+export { BOOT_NOTICE, DEFAULT_GOVERNING_LAW, HEADER_COMMENT, LICENSE_TEXT, README_SECTION };
 
 /**
  * `daywalker license apply|check`: puts the DevPulse source-available license into a project (LICENSE file,
@@ -16,7 +16,7 @@ export interface LicenseOptions {
   dir: string;
   /** Report what would change without writing. */
   dryRun?: boolean;
-  /** Governing law and venue to put in the LICENSE, e.g. "the State of Delaware, USA" (an owner decision; left as a placeholder otherwise). */
+  /** Governing law and venue for the LICENSE, e.g. "the State of Delaware, USA". Defaults to North Carolina, USA (DEFAULT_GOVERNING_LAW). */
   governingLaw?: string;
   /** Replace a LICENSE file that is not ours. */
   replaceExisting?: boolean;
@@ -59,11 +59,14 @@ function write(dir: string, file: string, content: string, opts: LicenseOptions,
 // ---------- LICENSE ----------
 
 const GOVERNING_RE = /governed by the laws of ([\s\S]+?),\s+excluding its conflict-of-laws rules/;
-const PLACEHOLDER_FLAT = GOVERNING_LAW_PLACEHOLDER.replace(/\s+/g, " ");
+const flat = (text: string) => text.replace(/\s+/g, " ").trim();
 
-/** The license text with the governing-law clause filled in (wrapped like the rest of the text). */
+/** The license text, with the governing law and venue replaced when one is given (wrapped like the rest of the text). */
 function renderLicense(governingLaw?: string): string {
-  const body = governingLaw ? LICENSE_TEXT.replace(GOVERNING_LAW_PLACEHOLDER, governingLaw.replace(/\s+/g, " ").trim()) : LICENSE_TEXT;
+  const law = governingLaw ? flat(governingLaw) : "";
+  // The default is hard-wrapped inside the template, so match it across line breaks.
+  const defaultLaw = new RegExp(DEFAULT_GOVERNING_LAW.split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\s+"));
+  const body = law && law !== DEFAULT_GOVERNING_LAW ? LICENSE_TEXT.replace(defaultLaw, () => law) : LICENSE_TEXT;
   return body.endsWith("\n") ? body : `${body}\n`;
 }
 
@@ -79,12 +82,9 @@ function applyLicenseFile(opts: LicenseOptions, report: LicenseReport) {
     report.todo.push("LICENSE exists and is a different license; kept it. Re-run with --replace-existing to replace it (recipients of earlier copies keep the old terms).");
     return;
   }
-  // Keep a governing-law clause the owner filled in earlier, unless one is given now.
-  const earlier = existing === null ? null : GOVERNING_RE.exec(existing)?.[1];
-  const law = opts.governingLaw ?? (earlier && earlier.replace(/\s+/g, " ") !== PLACEHOLDER_FLAT ? earlier : undefined);
-  const text = renderLicense(law);
-  if (!law) report.todo.push("LICENSE still has the governing-law placeholder: pick the governing law and venue (an owner decision, ideally with counsel) and re-run with --governing-law \"…\".");
-  write(opts.dir, file, text, opts, report);
+  // Keep a governing law set earlier (it differs from the default) unless one is given now.
+  const earlier = existing === null || !isOurs(existing) ? undefined : GOVERNING_RE.exec(existing)?.[1];
+  write(opts.dir, file, renderLicense(opts.governingLaw ?? earlier), opts, report);
 }
 
 // ---------- package.json ----------
@@ -277,11 +277,8 @@ export function checkLicense(opts: LicenseOptions): LicenseReport {
   else {
     const text = read(lic);
     const law = GOVERNING_RE.exec(text)?.[1];
-    const flat = law?.replace(/\s+/g, " ").trim();
-    if (renderLicense(flat && flat !== PLACEHOLDER_FLAT ? flat : undefined).replace(/\s+/g, " ").trim() !== text.replace(/\s+/g, " ").trim()) {
-      report.problems.push("LICENSE differs from the current license text (run `daywalker license apply`)");
-    }
-    if (!flat || flat === PLACEHOLDER_FLAT) report.todo.push("LICENSE still has the governing-law placeholder (an owner decision).");
+    // The governing law may be changed on purpose (--governing-law); everything else must match the current text.
+    if (flat(renderLicense(law)) !== flat(text)) report.problems.push("LICENSE differs from the current license text (run `daywalker license apply`)");
   }
   const rootPkg = path.join(opts.dir, "package.json");
   if (fs.existsSync(rootPkg)) {
