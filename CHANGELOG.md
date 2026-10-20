@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.18.2
+- **Examples:** adds `examples/auth-signed-oauth-token.ts`, showing how to sign the `POST /api/v1/oauth/token` request with `signRequest`. Errors from the management client are `DaywalkerManagementError` (`status`, `code`). No code changes.
 
 ## 0.18.1
 - Release housekeeping: ignore internal maintenance docs and `.junie/` in `.gitignore` and `.dockerignore`. No code changes.
