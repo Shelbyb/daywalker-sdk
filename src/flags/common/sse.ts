@@ -43,6 +43,11 @@ export class SseParser {
     const scanFrom = this.buffer.length;
     this.buffer += chunk;
     const out: SseEvent[] = [];
+    // Reading the concatenated buffer would flatten it on every chunk, so skip that when the chunk ends no line.
+    if (!chunk.includes("\n") && !chunk.includes("\r")) {
+      this.checkSize();
+      return out;
+    }
     // Lines end with CRLF, LF or CR. A CR ends the line immediately (so events
     // dispatch without waiting for more bytes); an LF right after it is skipped.
     let start = 0;
@@ -59,13 +64,17 @@ export class SseParser {
       if (ev) out.push(ev);
     }
     this.buffer = this.buffer.slice(start);
+    this.checkSize();
+    return out;
+  }
+
+  private checkSize() {
     if (this.buffer.length + this.dataSize > this.maxEventSize) {
       this.buffer = "";
       this.data = [];
       this.dataSize = 0;
       throw new SseError(`Stream event exceeded ${this.maxEventSize} characters`);
     }
-    return out;
   }
 
   private line(line: string): SseEvent | null {
