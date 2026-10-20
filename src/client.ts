@@ -322,6 +322,23 @@ function isRateLimitWindow(value: unknown): value is RateLimitWindow {
   return ["limit", "remaining", "reset"].every((k) => typeof w[k] === "number" && Number.isFinite(w[k]));
 }
 
+/**
+ * When a validation answer says the token expires (epoch ms): `expiresAt` / `expires_at` / `exp` as an ISO date,
+ * epoch seconds or epoch ms. Undefined when it says nothing, NaN when what it says can't be read.
+ */
+function answerExpiry(json: Record<string, unknown>, payloadData: Record<string, unknown>): number | undefined {
+  for (const src of [payloadData, json]) {
+    for (const k of ["expiresAt", "expires_at", "exp"]) {
+      const v = src[k];
+      if (v === undefined || v === null) continue;
+      if (typeof v === "number") return Number.isFinite(v) ? (v < 1e11 ? v * 1000 : v) : NaN;
+      if (typeof v === "string") return Date.parse(v);
+      return NaN;
+    }
+  }
+  return undefined;
+}
+
 /** Why a `valid: true` answer can't be trusted as a validation result, or null when its shape is sane. */
 function malformedValidation(json: Record<string, unknown>, payloadData: Record<string, unknown>): string | null {
   for (const src of [json, payloadData]) {
@@ -1175,6 +1192,13 @@ export class Daywalker {
         if (problem) {
           return unavailable(`Daywalker Auth returned a malformed validation result (${problem})`);
         }
+        const expiresAtMs = answerExpiry(json, payloadData);
+        if (expiresAtMs !== undefined && Number.isNaN(expiresAtMs)) {
+          return unavailable("Daywalker Auth returned a malformed validation result (expiresAt is not a date)");
+        }
+        if (expiresAtMs !== undefined && expiresAtMs <= Date.now()) {
+          return fail({ ok: false, error: "EXPIRED", status: 401, message: "Token has expired" });
+        }
         const servedSlug = ((payloadData.serviceSlug ?? json.serviceSlug) as string | undefined)?.toLowerCase();
         const reported = (payloadData.services ?? json.services) as string[] | undefined;
         const services = Array.from(new Set((reported ?? (servedSlug ? [servedSlug] : [])).map((s) => s.toLowerCase())));
@@ -1208,7 +1232,7 @@ export class Daywalker {
 
         const result: ValidateResult = { ok: true, data };
         if (this.#config.cacheTtlMs > 0) {
-          this.#cacheSet(cacheKey, result, this.#config.cacheTtlMs);
+          this.#cacheSet(cacheKey, result, this.#config.cacheTtlMs, expiresAtMs);
         }
         return result;
       }
@@ -1445,7 +1469,11 @@ export class Daywalker {
         this.#tokenFlight = null;
       });
     }
-    return (await this.#tokenFlight).accessToken;
+    const tokens = await this.#tokenFlight;
+    if (tokens.expiresAt <= Math.floor(Date.now() / 1000)) {
+      throw new DaywalkerAuthError("Daywalker Auth issued an access token that has already expired", 502, "SERVICE_UNAVAILABLE");
+    }
+    return tokens.accessToken;
   }
 
   /** Licenses from the client credentials grant, by service slug. Kept out of TokenSet so they are never serialized. */
@@ -1535,6 +1563,9 @@ export class Daywalker {
         bundle = await this.#openBundle(license.licenseKey, sealed as { iv: string; tag: string; ciphertext: string }, slug);
       } catch {
         bundle = null;
+      }
+      if (bundle && Date.parse(bundle.expiresAt) <= Date.now()) {
+        throw new DaywalkerAuthError(`Daywalker Auth returned an expired bundle for ${slug}`, 502, "BUNDLE_UNREADABLE");
       }
       if (bundle) {
         this.#bundles.set(slug, bundle);

@@ -1,4 +1,4 @@
-import { baseUrl, DevPulseHttpError, readText, retryAfterSeconds, send, userAgent, type HttpOptions } from "../common/http.js";
+import { baseUrl, byteLength, DevPulseHttpError, readText, retryAfterSeconds, send, userAgent, type HttpOptions } from "../common/http.js";
 
 /**
  * DevPulse on-call Events API v2 (PagerDuty-compatible): `POST {host}/oncall/v2/enqueue` to
@@ -53,7 +53,7 @@ export class OncallClient {
 
   private async send(event: Record<string, unknown>): Promise<OncallResult> {
     const body = JSON.stringify({ routing_key: this.#key, ...event });
-    if (body.length > MAX_BODY) throw new Error("On-call event is larger than 512 KB");
+    if (byteLength(body) > MAX_BODY) throw new Error("On-call event is larger than 512 KB");
     const res = await send(this.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "user-agent": userAgent("Oncall") }, body }, this.o);
     if (!res.ok) throw new DevPulseHttpError("On-call event", res.status, await readText(res, 1000), retryAfterSeconds(res));
     const json = (await res.json().catch(() => ({}))) as { status?: string; message?: string; dedup_key?: string };

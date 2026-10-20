@@ -42,7 +42,14 @@ async function get(options: SecretsOptions, format: "json" | "dotenv"): Promise<
 
 /** Fetch the token's secrets as an object. Throws `DevPulseHttpError` (401 bad token, 403 IP not allowed, 429). */
 export async function fetchSecrets(options: SecretsOptions): Promise<SecretsResult> {
-  const json = JSON.parse(await get(options, "json")) as { secrets?: Record<string, unknown>; environment?: unknown; warnings?: unknown };
+  const text = await get(options, "json");
+  let json: { secrets?: Record<string, unknown>; environment?: unknown; warnings?: unknown };
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // Not rethrown: V8's SyntaxError message quotes part of the input, i.e. secret values.
+    throw new Error("Secrets response is not valid JSON");
+  }
   if (!json || typeof json.secrets !== "object" || json.secrets === null) throw new Error("Unexpected secrets response");
   const secrets: Record<string, string> = Object.create(null);
   for (const [k, v] of Object.entries(json.secrets)) if (typeof v === "string") secrets[k] = v;
@@ -61,7 +68,7 @@ export function fetchDotenv(options: SecretsOptions): Promise<string> {
 /** Parse dotenv text (KEY=value, optional `export`, single/double quotes, # comments, \n escapes in double quotes). */
 export function parseDotenv(text: string): Record<string, string> {
   const out: Record<string, string> = Object.create(null);
-  const re = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*('(?:[^'])*'|"(?:\\.|[^"\\])*"|[^\r\n]*)\s*$/gm;
+  const re = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*=[ \t]*('(?:[^'])*'|"(?:\\.|[^"\\])*"|[^\r\n]*)[ \t]*(?:#[^\r\n]*)?$/gm;
   for (const m of text.matchAll(re)) {
     let v = m[2]!;
     if (v.startsWith("'")) v = v.slice(1, -1);

@@ -32,6 +32,15 @@ describe("toDevPulseContext", () => {
     });
     expect(toDevPulseContext({ kind: "multi", user: { key: "u", since: d } } as never)).toEqual({ kind: "multi", user: { key: "u", since: "2025-06-01T00:00:00.000Z" } });
   });
+
+  it("keeps a __proto__ key as data: targetingKey/kind can't be inherited through it", () => {
+    const ctx = JSON.parse('{"__proto__":{"targetingKey":"admin","kind":"organization"},"key":"u1"}') as Record<string, never>;
+    const out = toDevPulseContext(ctx);
+    expect(out.key).toBe("u1");
+    expect(out.kind).toBe("user");
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as { targetingKey?: unknown }).targetingKey).toBeUndefined();
+  });
 });
 
 describe("DevPulseServerProvider", () => {

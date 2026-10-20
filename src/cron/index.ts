@@ -22,7 +22,7 @@ export type PingResult = { ok: boolean; status: number };
 
 export class CronMonitor {
   readonly #url: string;
-  private readonly o: CronMonitorOptions;
+  private readonly o: Omit<CronMonitorOptions, "pingUrl">;
 
   constructor(options: CronMonitorOptions) {
     if (!options.pingUrl) throw new Error("pingUrl is required");
@@ -30,7 +30,9 @@ export class CronMonitor {
     const u = new URL(options.pingUrl);
     if (!/^\/ping\/[^/]+\/?$/.test(u.pathname) || u.search || u.hash) throw new Error("pingUrl must look like https://<host>/ping/<token>");
     this.#url = `${u.origin}${u.pathname.replace(/\/$/, "")}`;
-    this.o = options;
+    // Keep the token-bearing URL only in #url, so util.inspect / console.log never prints it.
+    const { pingUrl: _drop, ...rest } = options;
+    this.o = rest;
   }
 
   /** Never serialize the ping URL (it holds the token). */

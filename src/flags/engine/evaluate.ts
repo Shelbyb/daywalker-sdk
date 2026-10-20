@@ -166,6 +166,8 @@ export class MemoryStore implements DataStore {
   /** Apply a versioned upsert; stale versions are ignored. Returns true when applied. */
   upsert(kind: "flag" | "segment", item: FlagConfig | SegmentConfig): boolean {
     const map = (kind === "flag" ? this.flags : this.segments) as Map<string, FlagConfig | SegmentConfig>;
+    // A missing or non-numeric version would compare false against anything and overwrite newer data.
+    if (!item || typeof item.key !== "string" || !Number.isFinite(item.version)) return false;
     const cur = map.get(item.key);
     if (cur && cur.version >= item.version) return false;
     map.set(item.key, item);

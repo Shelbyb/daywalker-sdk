@@ -3,6 +3,7 @@ import type { ConfigBundle, PublicJwk, PublicJwks } from "./types.js";
 import { verifyJwtLease } from "./crypto/signatures.js";
 import { webcrypto } from "./crypto/webcrypto.js";
 import { base64ToBytes, hexToBytes, utf8ToString } from "./crypto/encoding.js";
+import { assertSecureUrl } from "./secure-url.js";
 
 /** A per-service rate limit as carried in the `service_limits` claim of an access token. */
 export interface ServiceLimit {
@@ -162,7 +163,14 @@ export class DaywalkerManagementClient {
   readonly #timeoutMs: number;
 
   constructor(options: ManagementClientOptions) {
-    if (!options?.authUrl || !/^https?:\/\//.test(options.authUrl)) throw new DaywalkerError("authUrl must be an http(s) URL");
+    if (!options?.authUrl || !/^https?:\/\//i.test(options.authUrl)) throw new DaywalkerError("authUrl must be an http(s) URL");
+    // The session JWT must never travel in cleartext: https only (http just for localhost), no credentials.
+    try {
+      assertSecureUrl("authUrl", options.authUrl);
+    } catch (err) {
+      throw new DaywalkerError((err as Error).message);
+    }
+    if (/[?#]/.test(options.authUrl)) throw new DaywalkerError("authUrl must not contain a query or fragment");
     if (!options.sessionToken) throw new DaywalkerError("sessionToken is required");
     this.#base = options.authUrl.replace(/\/+$/, "");
     this.#auth = options.sessionToken;

@@ -47,6 +47,20 @@ describe("bucketing", () => {
     expect(bucketContext(ctx, "a", "s1", { seed: 61 }).bucket).toBe(bucketContext(ctx, "b", "s2", { seed: 61 }).bucket);
   });
 
+  it("treats seed: null (as serialized for no seed) as unseeded", () => {
+    const ctx = parseContext({ key: "u" });
+    expect(bucketContext(ctx, "a", "s1", { seed: null as never }).bucket).toBe(bucketContext(ctx, "a", "s1", {}).bucket);
+  });
+
+  it("MemoryStore.upsert ignores items without a numeric version", () => {
+    const store = new MemoryStore({ flags: { f: flag({ version: 5 }) } });
+    expect(store.upsert("flag", { ...flag(), version: undefined as never })).toBe(false);
+    expect(store.upsert("flag", { ...flag(), version: Number.NaN })).toBe(false);
+    expect(store.upsert("flag", { ...flag(), version: "9" as never })).toBe(false);
+    expect(store.getFlag("f")!.version).toBe(5);
+    expect(store.upsert("flag", { ...flag(), version: 6 })).toBe(true);
+  });
+
   it("distributes rollouts close to their weights", () => {
     const f = flag({ fallthrough: { rollout: { variations: [{ variation: 1, weight: 30000 }, { variation: 0, weight: 70000 }] } } });
     let on = 0;

@@ -74,7 +74,11 @@ export function useFlagDetail<T extends FlagValue>(key: string, defaultValue: T)
   const defaultJson = JSON.stringify(defaultValue);
   const subscribe = useMemo(() => (cb: () => void) => client.on(`change:${key}`, cb), [client, key]);
   // Snapshot is the serialized value so useSyncExternalStore sees stable identities.
-  const snapshot = () => JSON.stringify(client.allFlags()[key] ?? null);
+  // Own keys only: `allFlags()["constructor"]` would otherwise resolve to Object.prototype's.
+  const snapshot = () => {
+    const flags = client.allFlags();
+    return JSON.stringify(Object.hasOwn(flags, key) ? flags[key] : null);
+  };
   const serialized = useSyncExternalStore(subscribe, snapshot, snapshot);
   const detail = useMemo(() => client.peekVariationDetail(key, JSON.parse(defaultJson) as T), [client, key, defaultJson, serialized]); // eslint-disable-line react-hooks/exhaustive-deps
   // Record the evaluation (analytics) after commit, once per distinct result: renders can be

@@ -151,8 +151,9 @@ export async function verifyDpopProof(params: VerifyDpopProofParams): Promise<{ 
     if (!expectedHtu || typeof claims.htu !== "string" || htuOf(claims.htu) !== expectedHtu) {
       return { valid: false, error: "DPoP proof htu does not match the request URL" };
     }
-    const now = params.currentTime ?? Math.floor(Date.now() / 1000);
-    const maxAge = Math.max(1, Math.min(params.maxAgeSeconds ?? DPOP_MAX_AGE_SECONDS, DPOP_MAX_AGE_SECONDS));
+    const now = Number.isFinite(params.currentTime) ? (params.currentTime as number) : Math.floor(Date.now() / 1000);
+    const maxAgeOption = Number.isFinite(params.maxAgeSeconds) ? (params.maxAgeSeconds as number) : DPOP_MAX_AGE_SECONDS;
+    const maxAge = Math.max(1, Math.min(maxAgeOption, DPOP_MAX_AGE_SECONDS));
     if (typeof claims.iat !== "number" || !Number.isFinite(claims.iat) || Math.abs(now - claims.iat) > maxAge) {
       return { valid: false, error: "DPoP proof iat is missing or outside the accepted window" };
     }

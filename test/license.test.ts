@@ -16,7 +16,7 @@ function seal(licenseKey: string, payload: object) {
   return { iv: iv.toString("base64"), tag: c.getAuthTag().toString("base64"), ciphertext: ct.toString("base64") };
 }
 
-async function setup(opts: { withLicense?: boolean; tokenError?: Response; bundleError?: Response; bundleWindowOffset?: number } = {}) {
+async function setup(opts: { withLicense?: boolean; tokenError?: Response; bundleError?: Response; bundleWindowOffset?: number; bundleExpiresAt?: string } = {}) {
   const key = await generateSigningKey();
   const calls: string[] = [];
   let grants = 0;
@@ -41,7 +41,7 @@ async function setup(opts: { withLicense?: boolean; tokenError?: Response; bundl
     if (u.pathname === "/api/v1/services/svc/bundle") {
       if (opts.bundleError) return opts.bundleError.clone();
       const win = Math.floor(Date.now() / WINDOW) + (opts.bundleWindowOffset ?? 0);
-      const payload = { serviceSlug: "svc", dataKeySalt: "abc", features: { stage: "LIVE" }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + WINDOW).toISOString() };
+      const payload = { serviceSlug: "svc", dataKeySalt: "abc", features: { stage: "LIVE" }, issuedAt: new Date().toISOString(), expiresAt: opts.bundleExpiresAt ?? new Date(Date.now() + WINDOW).toISOString() };
       return Response.json({ serviceSlug: "svc", bundle: seal(hex("svc", key.publicJwk.kid, win), payload) });
     }
     return Response.json({});
@@ -92,6 +92,13 @@ describe("License and config bundle", () => {
   it("fetchBundle fails with BUNDLE_UNREADABLE when sealed under another key", async () => {
     const { client } = await setup({ bundleWindowOffset: -5 });
     await assert.rejects(client.fetchBundle(), (e: any) => e.code === "BUNDLE_UNREADABLE");
+  });
+
+  it("fetchBundle refuses a bundle that has already expired and never caches it", async () => {
+    const { client, calls } = await setup({ bundleExpiresAt: new Date(Date.now() - 1000).toISOString() });
+    await assert.rejects(client.fetchBundle(), (e: any) => e.code === "BUNDLE_UNREADABLE");
+    await assert.rejects(client.fetchBundle(), (e: any) => e.code === "BUNDLE_UNREADABLE");
+    assert.equal(calls.filter((p) => p.endsWith("/bundle")).length, 2);
   });
 
   it("fetchBundle surfaces SERVICE_REVOKED", async () => {

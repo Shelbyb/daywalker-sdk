@@ -36,6 +36,24 @@ describe("access token verification", () => {
     assert.match((await verify(mk({ exp: now - 31 }), { clockSkewSeconds: 300 })).error!, /expired/);
   });
 
+  it("rejects a missing, non-numeric or expired exp, a future nbf and a future iat", async () => {
+    assert.match((await verify(mk({ exp: undefined }))).error!, /exp/);
+    assert.match((await verify(mk({ exp: String(now + 600) }))).error!, /exp/);
+    assert.match((await verify(mk({ exp: now - 31 }))).error!, /expired/);
+    assert.match((await verify(mk({ nbf: now + 31 }))).error!, /not active/);
+    assert.match((await verify(mk({ nbf: "0" }))).error!, /not active/);
+    assert.match((await verify(mk({ iat: now + 31 }))).error!, /iat/);
+    assert.match((await verify(mk({ iat: "0" }))).error!, /iat/);
+    assert.strictEqual((await verify(mk({ iat: now + 29, nbf: now + 29 }))).valid, true);
+  });
+
+  it("never lets a non-finite currentTime or clockSkewSeconds accept an expired token", async () => {
+    const expired = mk({ exp: now - 3600 });
+    assert.match((await verify(expired, { currentTime: NaN })).error!, /expired/);
+    assert.match((await verify(expired, { clockSkewSeconds: NaN })).error!, /expired/);
+    assert.match((await verify(expired, { clockSkewSeconds: Infinity })).error!, /expired/);
+  });
+
   it("reads the user object only from a verified payload", async () => {
     const res = await verify(mk({ user: { id: "018f3c2a-7b4e-7c53-9d3b-2f6d1c7e9a10", name: "Ada", email: "ada@example.com" } }));
     assert.deepStrictEqual(accessTokenUser(res.payload!), { id: "018f3c2a-7b4e-7c53-9d3b-2f6d1c7e9a10", name: "Ada", email: "ada@example.com" });

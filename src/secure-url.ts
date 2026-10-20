@@ -10,12 +10,13 @@ export function assertSecureUrl(name: string, value: string): void {
   try {
     url = new URL(value);
   } catch {
-    throw new Error(`${name} must be an absolute https:// URL (got "${value}")`);
+    // The value isn't echoed: it may carry credentials or a key in its query string.
+    throw new Error(`${name} must be an absolute https:// URL`);
   }
   if (url.username || url.password) {
     throw new Error(`${name} must not contain credentials`);
   }
   if (url.protocol === "https:") return;
   if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)) return;
-  throw new Error(`${name} must use https:// (http:// is only allowed for localhost); got "${value}"`);
+  throw new Error(`${name} must use https:// (http:// is only allowed for localhost); got "${url.protocol}//${url.host}"`);
 }

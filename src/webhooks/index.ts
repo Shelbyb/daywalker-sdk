@@ -135,7 +135,8 @@ export async function verifyWebhook<D = Record<string, unknown>>(options: Verify
   const seconds = Number(ts.trim());
   const tolerance = options.toleranceSeconds ?? 300;
   const now = Math.floor((options.now ?? Date.now()) / 1000);
-  if (Math.abs(now - seconds) > tolerance) throw new WebhookVerificationError("TIMESTAMP_OUT_OF_TOLERANCE", "Webhook timestamp is too old or too far in the future");
+  // Negated so a NaN tolerance or clock (e.g. Number(process.env.X) unset) fails closed instead of accepting any timestamp.
+  if (!(Math.abs(now - seconds) <= tolerance)) throw new WebhookVerificationError("TIMESTAMP_OUT_OF_TOLERANCE", "Webhook timestamp is too old or too far in the future");
 
   const body = bodyBytes(options.body);
   const prefix = enc.encode(`${id}.${seconds}.`);

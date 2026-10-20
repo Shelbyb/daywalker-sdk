@@ -99,4 +99,49 @@ describe("DevPulseNodeClient", () => {
     expect(seen).toEqual(["stale", "recovered"]);
     await client.close();
   });
+
+  it("keeps a tombstone on delete so an older patch can't resurrect the flag", async () => {
+    const encoder = new TextEncoder();
+    const ev = (type: string, data: unknown) => `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
+    let push!: (s: string) => void;
+    const f = (async () => new Response(new ReadableStream<Uint8Array>({ start: (c) => void (push = (s) => c.enqueue(encoder.encode(s))) }))) as unknown as typeof fetch;
+    const client = init("k", { baseUrl: "http://localhost:1", sendEvents: false, fetch: f });
+    await new Promise((r) => setTimeout(r, 10));
+    push(ev("put", { path: "/", data: { flags: { a: flag("a", true) }, segments: {} } }));
+    await client.waitForInitialization({ timeoutMs: 1000 });
+    push(ev("delete", { path: "/flags/a", version: 3 }));
+    push(ev("patch", { path: "/flags/a", data: { ...flag("a", true), version: 2 } }));
+    // Missing version: never overwrites (it used to compare false and win).
+    push(ev("patch", { path: "/flags/a", data: { ...flag("a", true), version: undefined } }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect((await client.variationDetail("a", { key: "u" }, "d")).reason).toEqual({ kind: "ERROR", errorKind: "FLAG_NOT_FOUND" });
+    expect(Object.keys((await client.allFlagsState({ key: "u" }, { clientSideOnly: false })).toJSON())).toEqual([]);
+    push(ev("patch", { path: "/flags/a", data: { ...flag("a", true), version: 4 } }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await client.variation("a", { key: "u" }, false)).toBe(true);
+    await client.close();
+  });
+
+  it("polling: passes a timeout signal, and stops polling on 401", async () => {
+    const signals: unknown[] = [];
+    const f = (async (_u: string, init: RequestInit) => {
+      signals.push(init.signal);
+      return new Response(null, { status: 401 });
+    }) as unknown as typeof fetch;
+    const client = init("k", { baseUrl: "http://localhost:1", stream: false, sendEvents: false, fetch: f });
+    const err = await client.waitForInitialization().catch((e: Error) => e);
+    expect((err as Error).message).toBe("Invalid SDK key");
+    expect(signals[0] instanceof AbortSignal).toBe(true);
+    expect((client as unknown as { poller: unknown }).poller).toBe(null);
+    await client.close();
+  });
+
+  it("allFlagsState keeps a flag keyed __proto__ as an own property", async () => {
+    const flags = JSON.parse(JSON.stringify({ x: flag("__proto__", true, true) }).replace('"x"', '"__proto__"')) as Record<string, ReturnType<typeof flag>>;
+    const client = init("sdk_test", { baseUrl: "http://unused", initialData: { flags } });
+    const state = (await client.allFlagsState({ key: "u", plan: "pro" })).toJSON();
+    expect(Object.keys(state)).toEqual(["__proto__"]);
+    expect(Object.getPrototypeOf(state)).toBe(Object.prototype);
+    expect(JSON.parse(JSON.stringify(state)).__proto__).toEqual({ value: true, variation: 0, version: 1 });
+  });
 });

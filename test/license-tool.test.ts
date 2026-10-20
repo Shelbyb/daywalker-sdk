@@ -181,6 +181,38 @@ describe("license check", () => {
   });
 });
 
+describe("license apply stays inside --dir", () => {
+  const posixOnly = { skip: process.platform === "win32" };
+
+  it("ignores --include paths and workspaces outside the project", () => {
+    const outside = project({ "victim.ts": "export const v = 1;\n", "package.json": JSON.stringify({ name: "victim" }, null, 2) + "\n" });
+    const dir = project({
+      "package.json": JSON.stringify({ name: "root", workspaces: [`../${path.basename(outside)}`] }, null, 2) + "\n",
+      "src/a.ts": "export const a = 1;\n",
+    });
+    const report = applyLicense({ dir, include: [path.join(outside, "victim.ts"), `../${path.basename(outside)}/victim.ts`, "src/a.ts"] });
+    assert.equal(read(outside, "victim.ts"), "export const v = 1;\n");
+    assert.equal(read(outside, "package.json"), JSON.stringify({ name: "victim" }, null, 2) + "\n");
+    assert.ok(read(dir, "src/a.ts").startsWith(HEADER_COMMENT));
+    assert.ok(report.changed.every((f) => !f.startsWith("..")), report.changed.join(","));
+  });
+
+  it("never writes through symlinks", posixOnly, () => {
+    const outside = project({ "secret.ts": 'import "@shelbyb/daywalker-sdk";\n', "README.md": "# Other\n", "LICENSE": "MIT\n" });
+    const dir = project({ "package.json": JSON.stringify({ name: "root" }, null, 2) + "\n" });
+    fs.symlinkSync(path.join(outside, "secret.ts"), path.join(dir, "linked.ts"));
+    fs.symlinkSync(path.join(outside, "README.md"), path.join(dir, "README.md"));
+    fs.symlinkSync(path.join(outside, "LICENSE"), path.join(dir, "LICENSE"));
+    fs.symlinkSync(outside, path.join(dir, "linkdir"));
+    const report = applyLicense({ dir, replaceExisting: true, include: ["linked.ts", "linkdir/secret.ts"] });
+    assert.equal(read(outside, "secret.ts"), 'import "@shelbyb/daywalker-sdk";\n');
+    assert.equal(read(outside, "README.md"), "# Other\n");
+    assert.equal(read(outside, "LICENSE"), "MIT\n");
+    assert.ok(report.todo.some((t) => /README\.md is a symlink/.test(t)));
+    assert.ok(report.todo.some((t) => /LICENSE is a symlink/.test(t)));
+  });
+});
+
 describe("daywalker license (CLI)", () => {
   const run = (args: string[]) => spawnSync(process.execPath, ["--import", TSX, CLI, ...args], { encoding: "utf8" });
 

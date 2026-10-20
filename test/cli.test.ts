@@ -217,6 +217,37 @@ describe("CLI .env.local writing", () => {
     }
   });
 
+  it("refuses a non-https auth URL (flag, env or .env.local) before sending or writing anything", async () => {
+    const dir = tmpdir();
+    try {
+      registrations.length = 0;
+      for (const bad of ["http://auth.example.com", "https://user:pw@auth.example.com", "ftp://auth.example.com", "not a url"]) {
+        const res = await run(dir, ["init", "--service", "svc", "--skip-register", "--auth-url", bad]);
+        assert.notStrictEqual(res.status, 0, bad);
+        assert.match(res.stderr, /DAYWALKER_AUTH_URL/, bad);
+        assert.strictEqual(fs.existsSync(path.join(dir, ".env.local")), false, bad);
+      }
+      const bare = await run(dir, ["init", "--service", "svc", "--skip-register", "--auth-url"]);
+      assert.notStrictEqual(bare.status, 0);
+      const fromEnv = await run(dir, ["keys", "--domain", "svc.example.com"], {
+        env: { DAYWALKER_API_KEY: "srv_live_keys", DAYWALKER_AUTH_URL: "http://auth.example.com" },
+      });
+      assert.notStrictEqual(fromEnv.status, 0);
+      assert.match(fromEnv.stderr, /must use https/);
+      assert.doesNotMatch(fromEnv.stderr, /srv_live_keys/);
+
+      fs.writeFileSync(path.join(dir, ".env.local"), 'DAYWALKER_AUTH_URL="http://auth.example.com"\n', { mode: 0o600 });
+      const before = fs.readFileSync(path.join(dir, ".env.local"), "utf8");
+      const fromFile = await run(dir, ["rotate"], { env: { DAYWALKER_API_KEY: "srv_live_rotate", DAYWALKER_SIGNING_KEY: "x" } });
+      assert.notStrictEqual(fromFile.status, 0);
+      assert.match(fromFile.stderr, /must use https/);
+      assert.strictEqual(fs.readFileSync(path.join(dir, ".env.local"), "utf8"), before);
+      assert.strictEqual(registrations.length, 0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("replaces an existing 0644 file atomically with a 0600 one and keeps other lines", posixOnly, async () => {
     const dir = tmpdir();
     try {

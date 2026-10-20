@@ -23,19 +23,4 @@ npx -p @shelbyb/daywalker-sdk daywalker license check     # exits 1 when anythin
 
 `check` verifies the LICENSE text, the package fields, the README section, every header and the boot line.
 
-## Notes from the license review
-
-The text was redrafted from the first version (which mixed MIT's "without restriction ... sublicense" with "All rights
-reserved") to follow the structure of Elastic License 2.0, PolyForm and FSL/BSL: defined terms, a non-sublicensable
-grant, a no-circumvention clause (with examples), a Free Tier/Commercial Tier split, redistribution conditions, patent,
-trademark, termination with a 30-day cure, and standard warranty and liability terms. It is **source-available, not
-open source**. It is not legal advice; have counsel review it. Open decisions for the owner:
-
-1. Governing law and venue: defaults to North Carolina (state and federal courts there), with an injunctive-relief carve-out so the Licensor can go to court anywhere to stop a violation of the no-circumvention or redistribution terms. Counsel should confirm both, including how the one-sided carve-out reads.
-2. Whether the Free Tier limits should also be published on a versioned limits page the license points to.
-3. A written agreement or terms of service for the Commercial Tier.
-4. A privacy notice for the usage data metering sends.
-5. The SDK's own license terms (this package is published under its own proprietary terms).
-6. Whether to forbid third parties from offering the software as a hosted service.
-7. Optionally, a change date after which old versions become open source.
-8. Whether the rights are held by the LLC, the individual, or both.
+This is not legal advice; have counsel review the license text.

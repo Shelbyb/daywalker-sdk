@@ -58,6 +58,8 @@ export type AnalyticsOptions = {
    * Skipped when the client is opted out, or Do Not Track / Global Privacy Control is on. Default off.
    */
   autocaptureWebVitals?: boolean | WebVitalsOptions;
+  /** Per-request timeout in ms, so a hung connection can't stall the queue. Default 10000; 0 disables. */
+  timeoutMs?: number;
   fetch?: typeof fetch;
   onError?: (err: Error) => void;
 };
@@ -126,7 +128,9 @@ class Store {
     if (this.local) {
       try {
         const raw = localStorage.getItem(this.key);
-        if (raw) this.mem = JSON.parse(raw) as State;
+        const s = raw ? (JSON.parse(raw) as State | null) : null;
+        // Ignore corrupted or foreign values instead of throwing from the constructor.
+        if (s && typeof s === "object" && typeof s.distinctId === "string") this.mem = s;
       } catch {
         /* storage blocked: memory only */
       }
@@ -434,6 +438,7 @@ export class Analytics {
     const { batch, body } = this.takeBatch(MAX_BATCH_BYTES);
     if (!batch.length) return true;
     const f = this.opts.fetch ?? globalThis.fetch;
+    const ms = this.opts.timeoutMs ?? 10_000;
     try {
       const res = await f(this.endpoint, {
         method: "POST",
@@ -441,6 +446,7 @@ export class Analytics {
         body,
         // Browsers reject keepalive bodies over 64 KiB outright, so only small ones get it.
         keepalive: isBrowser && byteLength(body) < KEEPALIVE_MAX_BYTES,
+        signal: ms > 0 && typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ms) : undefined,
       });
       if (res.ok || (res.status >= 400 && res.status < 500 && res.status !== 429)) {
         if (!res.ok) this.opts.onError?.(new Error(`DevPulse analytics rejected ${batch.length} events: HTTP ${res.status}`));
@@ -455,6 +461,8 @@ export class Analytics {
         return false;
       }
       this.queue.unshift(...batch);
+      // Events captured while this batch was in flight may push the queue past its cap.
+      if (this.queue.length > this.opts.maxQueueSize) this.queue.splice(0, this.queue.length - this.opts.maxQueueSize);
       this.backoff = Math.min(60_000, (this.backoff || 1000) * 2);
       this.opts.onError?.(err as Error);
       this.schedule();

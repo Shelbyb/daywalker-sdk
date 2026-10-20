@@ -50,7 +50,9 @@ export function normalizePathname(pathname: string): string | null {
 }
 
 function isApiPath(pathname: string): boolean {
-  return pathname === "/api" || pathname.startsWith("/api/");
+  // Case-insensitive so `/API/x` is never let through by `protectApiOnly` (a case-insensitive router could serve it).
+  const lower = pathname.toLowerCase();
+  return lower === "/api" || lower.startsWith("/api/");
 }
 
 function extensionMatcher(extensions: RegExp | readonly string[] | undefined): ((pathname: string) => boolean) | null {

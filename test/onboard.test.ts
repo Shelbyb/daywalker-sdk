@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { runOnboard, STATE_FILE, type OnboardDeps } from "../src/onboard/index.ts";
 import { collectHookEnv, validateHook } from "../src/onboard/hooks.ts";
-import { OnboardApiError, type OnboardApi } from "../src/onboard/api.ts";
+import { createApi, OnboardApiError, type OnboardApi } from "../src/onboard/api.ts";
 import type { Prompter } from "../src/onboard/prompts.ts";
 import { buildAllowedOrigins, extractToken, normalizeAppUrl, validatePassword } from "../src/onboard/steps.ts";
 
@@ -198,6 +198,64 @@ describe("onboard flow", () => {
     assert.strictEqual(result.exitCode, 0);
     assert.deepStrictEqual(calls[1].body, { token: "tok_env" });
     assert.strictEqual(calls.find((c) => c.path === "/api/v1/tokens")!.body.allowedOrigins[1], "https://app.example.com");
+  });
+
+  it("registers the key against the same --auth-url the token was created on", async () => {
+    const env = { DAYWALKER_ONBOARD_PASSWORD: PASSWORD, DAYWALKER_ONBOARD_VERIFY_TOKEN: "tok_env" };
+    const opts = { yes: true, name: "Ada", email: "ada@example.com", service: "sonalyze", url: "app.example.com", "auth-url": "https://staging.auth.example.com" };
+    const result = await run(opts, null, fakeApi(), env);
+    assert.strictEqual(result.exitCode, 0);
+    assert.deepStrictEqual(inits, [{ service: "sonalyze", domain: "app.example.com", "auth-url": "https://staging.auth.example.com" }]);
+  });
+
+  it("refuses a non-https auth URL before sending the password anywhere", async () => {
+    const env = { DAYWALKER_ONBOARD_PASSWORD: PASSWORD, DAYWALKER_ONBOARD_VERIFY_TOKEN: "t" };
+    const opts = { yes: true, name: "Ada", email: "ada@example.com", service: "sonalyze", url: "app.example.com", "auth-url": "http://auth.example.com" };
+    const result = await runOnboard(opts, fakeDeps(), { cwd: dir, prompter: null, env, log: (m) => logs.push(m) });
+    assert.strictEqual(result.exitCode, 1);
+    assert.strictEqual(envStore.size, 0);
+  });
+
+  it("does not write the state file through a symlink", { skip: process.platform === "win32" }, async () => {
+    const target = path.join(dir, "elsewhere.txt");
+    fs.writeFileSync(target, "keep\n");
+    fs.symlinkSync(target, path.join(dir, STATE_FILE));
+    const prompter = fakePrompter(baseAnswers);
+    const result = await run({}, prompter);
+    assert.strictEqual(result.exitCode, 1);
+    assert.strictEqual(fs.readFileSync(target, "utf8"), "keep\n");
+  });
+
+  it("ignores services with malformed slugs from the server", async () => {
+    const api = fakeApi({ "/api/v1/services": () => ({ services: [{ id: "svc_x", slug: "bad\u001b[2Jslug" }, ...SERVICES] }) });
+    const prompter = fakePrompter(baseAnswers.map(([re, v]) => (/Which service/.test(String(re)) ? [re, "1"] : [re, v]) as [RegExp, string | boolean]));
+    const result = await run({}, prompter, api);
+    assert.strictEqual(result.exitCode, 0);
+    assert.strictEqual(calls.find((c) => c.path === "/api/v1/tokens")!.body.serviceId, SERVICES[0].id);
+    assert.ok(!logs.join("\n").includes("\u001b"));
+  });
+});
+
+describe("onboard API client", () => {
+  it("refuses insecure base URLs", () => {
+    for (const bad of ["http://auth.example.com", "https://u:p@auth.example.com", "nope"]) {
+      assert.throws(() => createApi({ baseUrl: bad }), /DAYWALKER_AUTH_URL/, bad);
+    }
+    assert.doesNotThrow(() => createApi({ baseUrl: "http://127.0.0.1:8787" }));
+  });
+
+  it("refuses redirects and times out every attempt", async (t) => {
+    const keepAlive = setInterval(() => {}, 1000); // AbortSignal.timeout timers are unref'd
+    t.after(() => clearInterval(keepAlive));
+    const seen: RequestInit[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      seen.push(init);
+      return new Promise((_resolve, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason)));
+    }) as unknown as typeof fetch;
+    const api = createApi({ baseUrl: "https://auth.example.com", fetchImpl, retries: 0, timeoutMs: 20 });
+    await assert.rejects(api("/api/v1/auth/login", { method: "POST", body: { email: "a", password: "b" } }), /Network error/);
+    assert.strictEqual(seen[0].redirect, "error");
+    assert.ok(seen[0].signal);
   });
 });
 

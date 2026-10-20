@@ -167,7 +167,7 @@ export class ApiClient {
   readonly host: string;
   private readonly origin: string;
   private readonly o: Required<Pick<ApiClientOptions, "refreshSkewSeconds" | "maxRetries" | "retryBaseMs" | "maxRetryDelayMs" | "timeoutMs">> & ApiClientOptions;
-  private token: { value: string; expiresAt: number } | null = null;
+  #token: { value: string; expiresAt: number } | null = null;
   private pending: Promise<string> | null = null;
   readonly #secret: string;
 
@@ -202,14 +202,14 @@ export class ApiClient {
 
   /** A valid access token, fetched with the client credentials grant and cached until shortly before expiry. */
   async getAccessToken(forceRefresh = false): Promise<string> {
-    if (!forceRefresh && this.token && this.now() < this.token.expiresAt - this.o.refreshSkewSeconds * 1000) return this.token.value;
+    if (!forceRefresh && this.#token && this.now() < this.#token.expiresAt - this.o.refreshSkewSeconds * 1000) return this.#token.value;
     this.pending ??= this.fetchToken().finally(() => (this.pending = null));
     return this.pending;
   }
 
   /** Forget the cached token (e.g. after revoking it). */
   clearToken() {
-    this.token = null;
+    this.#token = null;
   }
 
   private async fetchToken(): Promise<string> {
@@ -223,6 +223,7 @@ export class ApiClient {
         headers: { authorization: `Basic ${basic}`, "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
         body: form,
         cache: "no-store",
+        redirect: "error",
         signal: this.o.timeoutMs ? AbortSignal.timeout(this.o.timeoutMs) : undefined,
       } as RequestInit);
     } catch (err) {
@@ -231,12 +232,16 @@ export class ApiClient {
     const json = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; error?: string; error_description?: string };
     if (!res.ok || !json.access_token) throw new ApiAuthError(res.status, json.error ?? "invalid_response", json.error_description);
     const ttl = typeof json.expires_in === "number" && json.expires_in > 0 ? json.expires_in : 300;
-    this.token = { value: json.access_token, expiresAt: this.now() + ttl * 1000 };
+    this.#token = { value: json.access_token, expiresAt: this.now() + ttl * 1000 };
     return json.access_token;
   }
 
   private url(path: string, query?: RequestOptions["query"]): string {
     if (!path.startsWith("/") || path.startsWith("//") || /^[a-z][a-z0-9+.-]*:/i.test(path)) throw new Error("path must be a relative path starting with a single /");
+    // Reject dot segments (also %2e-encoded, and the \ / tab / newline forms the URL parser rewrites) so an
+    // interpolated id such as ".." (encodeURIComponent leaves it alone) cannot climb to another endpoint.
+    const pathname = path.split(/[?#]/, 1)[0]!;
+    if (/[\\\t\n\r]/.test(pathname) || pathname.split("/").some((s) => /^(?:\.|%2e){1,2}$/i.test(s))) throw new Error("path must not contain . or .. segments");
     const u = new URL(`${this.host}${path}`);
     if (u.origin !== this.origin) throw new Error("path must stay on the configured host");
     for (const [k, v] of Object.entries(query ?? {})) {

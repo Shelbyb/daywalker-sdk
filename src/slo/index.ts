@@ -43,7 +43,8 @@ export class SloReporter {
     this.o = options;
     const interval = options.flushIntervalMs ?? 10_000;
     if (interval > 0) {
-      this.timer = setInterval(() => void this.flush(), interval);
+      // flush() only rejects if onError itself throws; never let that become an unhandled rejection.
+      this.timer = setInterval(() => void this.flush().catch(() => {}), interval);
       (this.timer as { unref?: () => void }).unref?.();
     }
   }
@@ -51,8 +52,11 @@ export class SloReporter {
   /** Add counts (e.g. `record(ok ? 1 : 0, 1)` per request). Aggregated per minute until flushed. */
   record(good: number, total: number, at?: Date): void {
     if (!Number.isInteger(good) || !Number.isInteger(total) || good < 0 || total < 0 || good > total) throw new RangeError("good and total must be integers with 0 <= good <= total");
+    const ms = at ? at.getTime() : (this.o.now ?? Date.now)();
+    // An Invalid Date would become a NaN bucket whose toISOString() throws on every flush.
+    if (!Number.isFinite(ms)) throw new RangeError("at must be a valid Date");
     if (total === 0) return;
-    const minute = Math.floor((at?.getTime() ?? (this.o.now ?? Date.now)()) / 60_000) * 60_000;
+    const minute = Math.floor(ms / 60_000) * 60_000;
     const b = this.buckets.get(minute) ?? { good: 0, total: 0 };
     b.good += good;
     b.total += total;

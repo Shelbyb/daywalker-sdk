@@ -4,7 +4,7 @@ One small, type-checked file per use case. `npm run check:examples` builds the p
 
 | Import | Example |
 |---|---|
-| `@shelbyb/daywalker-sdk` | [auth-validate-token.ts](./auth-validate-token.ts), [auth-signed-fetch.ts](./auth-signed-fetch.ts) |
+| `@shelbyb/daywalker-sdk` | [auth-validate-token.ts](./auth-validate-token.ts), [auth-signed-fetch.ts](./auth-signed-fetch.ts), [auth-signed-oauth-token.ts](./auth-signed-oauth-token.ts) |
 | `@shelbyb/daywalker-sdk/next` | [next-proxy.ts](./next-proxy.ts), [next-route-handler.ts](./next-route-handler.ts) |
 | `@shelbyb/daywalker-sdk/middleware` | [middleware-web.ts](./middleware-web.ts) |
 | `@shelbyb/daywalker-sdk/express` | [express-node-http.ts](./express-node-http.ts) |

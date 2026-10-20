@@ -72,7 +72,8 @@ export class Logger {
     this.o = { ...rest, token: "" };
     const interval = options.flushIntervalMs ?? 5000;
     if (interval > 0) {
-      this.timer = setInterval(() => void this.flush(), interval);
+      // flush() only rejects if onError itself throws; never let that become an unhandled rejection.
+      this.timer = setInterval(() => void this.flush().catch(() => {}), interval);
       (this.timer as { unref?: () => void }).unref?.();
     }
   }
@@ -153,7 +154,7 @@ export class Logger {
       this.dropped += this.queue.length - max;
       this.queue.splice(0, this.queue.length - max);
     }
-    if (this.queue.length >= (this.o.flushAt ?? 100)) void this.flush();
+    if (this.queue.length >= (this.o.flushAt ?? 100)) void this.flush().catch(() => {});
   }
 
   private maxBatchBytes() {

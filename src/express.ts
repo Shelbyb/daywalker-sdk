@@ -1,6 +1,6 @@
 import { daywalker, Daywalker } from "./client.js";
 import { readCredentials, toAuthFailureResponse } from "./middleware.js";
-import type { TokenPayload } from "./types.js";
+import type { TokenPayload, ValidateResult } from "./types.js";
 
 interface Req {
   method?: string;
@@ -51,7 +51,13 @@ export function daywalkerAuth(options: { client?: Daywalker; serviceSlug?: strin
       return;
     }
 
-    const result = await client.validateToken(credentials.token, { serviceSlug, dpop: credentials.dpop });
+    let result: ValidateResult;
+    try {
+      result = await client.validateToken(credentials.token, { serviceSlug, dpop: credentials.dpop });
+    } catch {
+      // Express 4 doesn't catch async rejections: fail closed with a generic 503 instead of crashing or hanging.
+      result = { ok: false, error: "SERVICE_UNAVAILABLE", status: 503, message: "Token validation failed" };
+    }
     if (!result.ok) {
       const { status, ...body } = toAuthFailureResponse(result);
       if (body.retryAfter) {
