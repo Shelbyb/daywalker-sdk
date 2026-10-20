@@ -1,5 +1,8 @@
 # Changelog
 
+
+## 0.18.1
+- Release housekeeping: ignore internal maintenance docs and `.junie/` in `.gitignore` and `.dockerignore`. No code changes.
 ## 0.18.0
 - **License text:** governing law now defaults to North Carolina, USA (state and federal courts there, which is where the Licensor is based) instead of a placeholder, and section 10 gains an "Injunctive relief anywhere" paragraph: despite the exclusive venue, the Licensor may seek an injunction or other equitable relief in any court of competent jurisdiction, in any country, to stop a violation of Section 2 or 3 or an infringement of its IP. `--governing-law "…"` still overrides the governing law and venue, and a choice made earlier is kept on re-runs. `license check` no longer reports a governing-law to-do and accepts a deliberately changed governing law. Not legal advice; have counsel review.
 
