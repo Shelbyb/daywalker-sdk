@@ -243,7 +243,9 @@ describe("analytics in a browser", () => {
 });
 
 describe("analytics hardening", () => {
-  it("times out a hung request, requeues it and keeps flush() from hanging", async () => {
+  it("times out a hung request, requeues it and keeps flush() from hanging", async (t) => {
+    const keepAlive = setInterval(() => {}, 1000); // AbortSignal.timeout timers are unref'd
+    t.after(() => clearInterval(keepAlive));
     let calls = 0;
     const fetch = ((_u: string, init: RequestInit) => {
       calls++;

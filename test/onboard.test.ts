@@ -244,7 +244,9 @@ describe("onboard API client", () => {
     assert.doesNotThrow(() => createApi({ baseUrl: "http://127.0.0.1:8787" }));
   });
 
-  it("refuses redirects and times out every attempt", async () => {
+  it("refuses redirects and times out every attempt", async (t) => {
+    const keepAlive = setInterval(() => {}, 1000); // AbortSignal.timeout timers are unref'd
+    t.after(() => clearInterval(keepAlive));
     const seen: RequestInit[] = [];
     const fetchImpl = (async (_url: string, init: RequestInit) => {
       seen.push(init);
