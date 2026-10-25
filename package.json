@@ -207,6 +207,6 @@
   },
   "sideEffects": false,
   "dependencies": {
-    "re2js": "2.8.6"
+    "re2js": "2.9.0"
   }
 }
